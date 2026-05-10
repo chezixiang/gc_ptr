@@ -122,8 +122,10 @@ TEST_F(GcPtrTest, Should_ReleaseObject) {
     {
         auto ptr = make_gc<Counted>(123);
         EXPECT_EQ(Counted::counter, 1);
-        ptr.release();
+        Counted* raw = ptr.release();
         EXPECT_FALSE(ptr);
+        EXPECT_EQ(raw->value, 123);
+        delete raw;  // 现在需要手动删除
     }
     EXPECT_EQ(Counted::counter, 0);
 }

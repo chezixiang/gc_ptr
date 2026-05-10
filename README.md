@@ -1,4 +1,4 @@
-# gc_ptr
+# gc\_ptr
 
 一个用 C++ 实现的垃圾回收智能指针库。
 
@@ -37,7 +37,7 @@ GcPtr<MyClass>::set_destruct_threshold(100);
 
 ### 循环引用支持
 
-gc_ptr 自动处理循环引用，无需手动 break 引用链：
+gc\_ptr 自动处理循环引用，无需手动 break 引用链：
 
 ```cpp
 auto a = make_gc<Node>();
@@ -49,7 +49,7 @@ b->prev = a;
 
 ## API 文档
 
-### GcPtr&lt;T&gt;
+### GcPtr\<T>
 
 模板类，提供垃圾回收智能指针功能。
 
@@ -67,7 +67,7 @@ b->prev = a;
 
 #### 成员函数
 
-- `T* reset()` - 释放当前对象所有权
+- `void reset()` - 将当前对象置空并删除此前保存的对象
 - `T* reset(T* new_ptr)` - 重置为新对象
 - `void swap(GcPtr& other)` - 交换内容
 - `T& operator*()` / `const T& operator*() const` - 解引用
@@ -75,7 +75,7 @@ b->prev = a;
 - `T* get()` / `const T* get() const` - 获取原始指针
 - `explicit operator bool() const` - 检查是否为空
 - `void gc()` - 显式触发垃圾回收
-- `void release()` - 释放并删除当前对象
+- `T* release()` - 释放当前对象，返回原始指针，对象不再管控
 
 #### 静态成员函数
 
@@ -102,16 +102,19 @@ b->prev = a;
 项目使用 Makefile 构建和测试。确保系统上有 g++ 和 GTest。
 
 ### 构建和运行测试:
+
 ```bash
 make
 ```
 
 或者显式运行测试:
+
 ```bash
 make test
 ```
 
 清理构建产物:
+
 ```bash
 make clean
 ```

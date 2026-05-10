@@ -304,6 +304,15 @@ public:
 		}
 	}
 
+	T* release() {
+		T* old_ptr = static_cast<T*>(object_ptr);
+		if (old_ptr) {
+			unregister_gc_object(old_ptr);
+			object_ptr = nullptr;
+		}
+		return old_ptr;
+	}
+
 	void swap(GcPtr& other) noexcept {
 		using std::swap;
 		swap(object_ptr, other.object_ptr);
@@ -321,15 +330,6 @@ public:
 	explicit operator bool() const { return object_ptr != nullptr; }
 
 	void gc() { GcPtrBase::collect(); }
-
-	void release() {
-		if (object_ptr) {
-			T* p = static_cast<T*>(object_ptr);
-			unregister_gc_object(p);
-			delete p;
-			object_ptr = nullptr;
-		}
-	}
 
 	static void set_gc_interval(std::chrono::seconds t) {
 		GcPtrBase::set_gc_interval(t);
