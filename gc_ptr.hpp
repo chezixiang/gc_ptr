@@ -1,6 +1,23 @@
 #ifndef GC_PTR_HPP
 #define GC_PTR_HPP
 
+// GC scanning limitation:
+// This GC is a precise, conservative-style collector that scans only the
+// contiguous memory region of each managed object (sizeof(T) bytes starting
+// from the object's address). It discovers GcPtr members by their addresses
+// falling within that memory range.
+//
+// IMPORTANT: Do NOT store GcPtr inside dynamically allocated containers
+// such as std::vector, std::map, std::unordered_map, std::string, etc.
+// These containers allocate their elements on the heap, outside the scanned
+// sizeof(T) region, so GcPtr stored there will NOT be found by the GC,
+// causing reachable objects to be incorrectly collected.
+//
+// Safe patterns:
+//   struct Node { GcPtr<Node> next; };                    // OK - direct member
+//   struct Tree { GcPtr<Tree> left; GcPtr<Tree> right; };  // OK - direct members
+//   struct Bad { std::vector<GcPtr<int>> items; };         // WRONG - heap storage
+
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -48,8 +65,8 @@ protected:
 	GcPtrBase& operator=(GcPtrBase&&) = delete;
 
 	~GcPtrBase() {
-		unregister_this();
 		auto_collect_on_destruct();
+		unregister_this();
 	}
 
 	struct GcNode {
@@ -57,6 +74,7 @@ protected:
 		std::size_t size;
 		bool marked = false;
 		std::function<void()> deleter;
+		bool under_construction = true;
 	};
 
 	static std::map<void*, GcNode>& gc_objects() {
@@ -91,11 +109,11 @@ protected:
 #endif
 
 	static void register_gc_object(void* p, std::size_t sz,
-								   std::function<void()> d) {
+							   std::function<void()> d) {
 #ifdef GPTR_THREAD
 		std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-		gc_objects().emplace(p, GcNode{p, sz, false, std::move(d)});
+		gc_objects().emplace(p, GcNode{p, sz, false, std::move(d), true});
 		gc_ranges_dirty() = true;
 	}
 
@@ -257,21 +275,9 @@ protected:
 	static std::vector<void*> collect_unmarked_objects() {
 		std::vector<void*> to_delete;
 		for (const auto& [addr, node] : gc_objects())
-			if (!node.marked)
+			if (!node.marked && !node.under_construction)
 				to_delete.push_back(addr);
 		return to_delete;
-	}
-
-	static void delete_unmarked_objects(const std::vector<void*>& to_delete) {
-		for (void* addr : to_delete) {
-			auto it = gc_objects().find(addr);
-			if (it != gc_objects().end()) {
-				auto deleter = std::move(it->second.deleter);
-				gc_objects().erase(it);
-				gc_ranges_dirty() = true;
-				deleter();
-			}
-		}
 	}
 
 public:
@@ -280,32 +286,68 @@ public:
 		if (gc_in_progress.exchange(true, std::memory_order_acq_rel))
 			return;
 		std::unique_lock<std::shared_mutex> access_lock(gc_access_mutex());
+
+		try {
+			std::vector<std::function<void()>> deleters;
+			{
+				std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+				reset_all_marks();
+				std::vector<void*> queue = collect_root_objects();
+				mark_reachable_objects(queue);
+				std::vector<void*> to_delete = collect_unmarked_objects();
+
+				for (void* addr : to_delete) {
+					auto it = gc_objects().find(addr);
+					if (it != gc_objects().end()) {
+						deleters.push_back(std::move(it->second.deleter));
+						gc_objects().erase(it);
+						gc_ranges_dirty() = true;
+					}
+				}
+			}
+
+			access_lock.unlock();
+
+			for (auto& deleter : deleters) {
+				deleter();
+			}
+		} catch (...) {
+			gc_in_progress.store(false, std::memory_order_release);
+			throw;
+		}
+
+		gc_in_progress.store(false, std::memory_order_release);
 #else
 		if (gc_in_progress)
 			return;
 		gc_in_progress = true;
-#endif
 
 		try {
-#ifdef GPTR_THREAD
-			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
-#endif
-			reset_all_marks();
-			std::vector<void*> queue = collect_root_objects();
-			mark_reachable_objects(queue);
-			std::vector<void*> to_delete = collect_unmarked_objects();
-			delete_unmarked_objects(to_delete);
+			std::vector<std::function<void()>> deleters;
+			{
+				reset_all_marks();
+				std::vector<void*> queue = collect_root_objects();
+				mark_reachable_objects(queue);
+				std::vector<void*> to_delete = collect_unmarked_objects();
+
+				for (void* addr : to_delete) {
+					auto it = gc_objects().find(addr);
+					if (it != gc_objects().end()) {
+						deleters.push_back(std::move(it->second.deleter));
+						gc_objects().erase(it);
+						gc_ranges_dirty() = true;
+					}
+				}
+			}
+
+			for (auto& deleter : deleters) {
+				deleter();
+			}
 		} catch (...) {
-#ifdef GPTR_THREAD
-			gc_in_progress.store(false, std::memory_order_release);
-#else
 			gc_in_progress = false;
-#endif
 			throw;
 		}
-#ifdef GPTR_THREAD
-		gc_in_progress.store(false, std::memory_order_release);
-#else
+
 		gc_in_progress = false;
 #endif
 	}
@@ -366,7 +408,7 @@ public:
 #ifdef GPTR_THREAD
 			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-			gc_objects().emplace(ptr, GcNode{ptr, sizeof(T), false, [ptr] { delete ptr; }});
+			gc_objects().emplace(ptr, GcNode{ptr, sizeof(T), false, [ptr] { delete ptr; }, true});
 			gc_ranges_dirty() = true;
 		}
 
@@ -385,6 +427,15 @@ public:
 		}
 
 		object_ptr = ptr;
+		{
+#ifdef GPTR_THREAD
+			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
+			auto it = gc_objects().find(ptr);
+			if (it != gc_objects().end()) {
+				it->second.under_construction = false;
+			}
+		}
 		is_root = true;
 	}
 
@@ -396,7 +447,7 @@ public:
 			if (gc_objects().find(p) != gc_objects().end()) {
 				throw std::runtime_error("Pointer already registered with GC");
 			}
-			gc_objects().emplace(p, GcNode{p, sizeof(T), false, [p] { delete p; }});
+			gc_objects().emplace(p, GcNode{p, sizeof(T), false, [p] { delete p; }, false});
 			gc_ranges_dirty() = true;
 		}
 		object_ptr = p;
@@ -444,6 +495,9 @@ public:
 				}
 			}
 			if (should_delete) {
+#ifdef GPTR_THREAD
+				std::shared_lock<std::shared_mutex> access_lock(gc_access_mutex());
+#endif
 				delete old_ptr;
 			}
 			object_ptr = nullptr;
@@ -461,7 +515,7 @@ public:
 #ifdef GPTR_THREAD
 			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-			auto [it, inserted] = gc_objects().emplace(new_ptr, GcNode{new_ptr, sizeof(T), false, [new_ptr] { delete new_ptr; }});
+			auto [it, inserted] = gc_objects().emplace(new_ptr, GcNode{new_ptr, sizeof(T), false, [new_ptr] { delete new_ptr; }, false});
 			if (!inserted) {
 				throw std::runtime_error("Pointer already registered with GC");
 			}
@@ -483,11 +537,19 @@ public:
 				}
 			}
 			if (should_delete) {
+#ifdef GPTR_THREAD
+				std::shared_lock<std::shared_mutex> access_lock(gc_access_mutex());
+#endif
 				delete old_ptr;
 			}
 		}
 	}
 
+	// WARNING: release() transfers ownership out of GC management.
+	// The caller becomes responsible for manually deleting the returned pointer.
+	// After release(), the object is no longer tracked by GC and will not be
+	// collected automatically. Any other GcPtr pointing to the same object
+	// will become dangling. Use with extreme caution.
 	T* release() {
 		T* old_ptr = static_cast<T*>(object_ptr);
 		if (old_ptr) {
