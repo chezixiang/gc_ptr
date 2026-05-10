@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++26 -Wall -Wextra -Wpedantic -O2 -I.
+CXXFLAGS = -std=c++26 -Wall -Wextra -Wpedantic -g -I. -DGPTR_THREAD
 LDFLAGS = -lgtest -lgtest_main -pthread
 
 TEST_DIR = tests

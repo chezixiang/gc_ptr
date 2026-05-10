@@ -1,6 +1,7 @@
 #ifndef GC_PTR_HPP
 #define GC_PTR_HPP
 
+#include <cassert>
 #include <chrono>
 #include <functional>
 #include <map>
@@ -318,12 +319,24 @@ public:
 		void* raw = allocate_with_retry([] { return operator new(sizeof(T)); });
 		T* ptr = static_cast<T*>(raw);
 
-		register_gc_object(ptr, sizeof(T), [ptr] { delete ptr; });
+		// 先注册到 GC，这样对象内部的 GcPtr 成员能正确检测根对象
+		{
+#ifdef GPTR_THREAD
+			std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+			gc_objects().emplace(ptr, GcNode{ptr, sizeof(T), false, [ptr] { delete ptr; }});
+		}
 
 		try {
 			new (ptr) T(std::forward<Args>(args)...);
 		} catch (...) {
-			unregister_gc_object(ptr);
+			// 清理已注册的对象
+			{
+#ifdef GPTR_THREAD
+				std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+				gc_objects().erase(ptr);
+			}
 			operator delete(ptr);
 			throw;
 		}
@@ -332,12 +345,19 @@ public:
 		is_root = true;
 	}
 
-	explicit GcPtr(const T* p) {
-		auto* mp = const_cast<T*>(p);
-		if (mp) {
-			register_gc_object(mp, sizeof(T), [mp] { delete mp; });
+	explicit GcPtr(T* p) {
+		if (p) {
+#ifdef GPTR_THREAD
+			std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+			// 检查指针是否已注册
+			if (gc_objects().find(p) != gc_objects().end()) {
+				throw std::runtime_error("Pointer already registered with GC");
+			}
+			// 直接注册，避免再次加锁
+			gc_objects().emplace(p, GcNode{p, sizeof(T), false, [p] { delete p; }});
 		}
-		object_ptr = mp;
+		object_ptr = p;
 		is_root = true;
 	}
 
@@ -368,19 +388,60 @@ public:
 	~GcPtr() = default;
 
 	void reset() {
-		T* p = static_cast<T*>(object_ptr);
-		if (p) {
-			unregister_gc_object(p);
-			delete p;
+		T* old_ptr = static_cast<T*>(object_ptr);
+		if (old_ptr) {
+			{
+#ifdef GPTR_THREAD
+				std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+				gc_objects().erase(old_ptr);
+			}
+			delete old_ptr;
 			object_ptr = nullptr;
 		}
 	}
 
 	void reset(T* new_ptr) {
-		reset();
+		if (object_ptr == new_ptr) {
+			return;
+		}
+		
+		T* old_ptr = static_cast<T*>(object_ptr);
+		
 		if (new_ptr) {
-			register_gc_object(new_ptr, sizeof(T), [new_ptr] { delete new_ptr; });
+			// 先获取锁处理注册和注销
+			{
+#ifdef GPTR_THREAD
+				std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+				// 检查新指针是否已注册
+				if (gc_objects().find(new_ptr) != gc_objects().end()) {
+					throw std::runtime_error("Pointer already registered with GC");
+				}
+				// 如果有旧指针，先注销
+				if (old_ptr) {
+					gc_objects().erase(old_ptr);
+				}
+				// 直接注册，避免再次加锁
+				gc_objects().emplace(new_ptr, GcNode{new_ptr, sizeof(T), false, [new_ptr] { delete new_ptr; }});
+			}
 			object_ptr = new_ptr;
+			// 在锁外删除旧对象
+			if (old_ptr) {
+				delete old_ptr;
+			}
+		} else {
+			// 置空，先处理旧指针
+			if (old_ptr) {
+				{
+#ifdef GPTR_THREAD
+					std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+					gc_objects().erase(old_ptr);
+				}
+				delete old_ptr;
+				object_ptr = nullptr;
+			}
 		}
 	}
 
@@ -400,11 +461,23 @@ public:
 		swap(object_ptr, other.object_ptr);
 	}
 
-	T& operator*() { return *static_cast<T*>(object_ptr); }
-	const T& operator*() const { return *static_cast<T*>(object_ptr); }
+	T& operator*() { 
+		assert(object_ptr && "dereferencing null GcPtr");
+		return *static_cast<T*>(object_ptr); 
+	}
+	const T& operator*() const { 
+		assert(object_ptr && "dereferencing null GcPtr");
+		return *static_cast<T*>(object_ptr); 
+	}
 
-	T* operator->() { return static_cast<T*>(object_ptr); }
-	const T* operator->() const { return static_cast<T*>(object_ptr); }
+	T* operator->() { 
+		assert(object_ptr && "dereferencing null GcPtr");
+		return static_cast<T*>(object_ptr); 
+	}
+	const T* operator->() const { 
+		assert(object_ptr && "dereferencing null GcPtr");
+		return static_cast<T*>(object_ptr); 
+	}
 
 	T* get() { return static_cast<T*>(object_ptr); }
 	const T* get() const { return static_cast<T*>(object_ptr); }
