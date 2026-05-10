@@ -1,0 +1,69 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Dynamic Linker output
+*.dll
+*.dylib
+*.so
+*.so.*
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug Files
+*.pdb
+*.idb
+*.ipdb
+
+# Static Linker output
+*.lib
+*.a
+
+# Compiler output directories
+bin/
+out/
+build/
+Debug/
+Release/
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Backup files
+*.bak
+*~
+
+# Log files
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
