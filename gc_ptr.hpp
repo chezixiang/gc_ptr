@@ -304,6 +304,8 @@ public:
 		}
 	}
 
+	// 释放所有权，返回原始指针。
+	// 警告：对象不再由 GC 管控，调用者必须手动 delete 返回的指针，否则会导致内存泄漏！
 	T* release() {
 		T* old_ptr = static_cast<T*>(object_ptr);
 		if (old_ptr) {

@@ -75,7 +75,7 @@ b->prev = a;
 - `T* get()` / `const T* get() const` - 获取原始指针
 - `explicit operator bool() const` - 检查是否为空
 - `void gc()` - 显式触发垃圾回收
-- `T* release()` - 释放当前对象，返回原始指针，对象不再管控
+- `T* release()` - 释放当前对象，返回原始指针，对象不再由 GC 管控，调用者必须手动 delete 返回的指针以避免内存泄漏
 
 #### 静态成员函数
 
