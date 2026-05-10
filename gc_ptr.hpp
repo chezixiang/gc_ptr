@@ -216,7 +216,6 @@ private:
 	void register_this() {
 		all_ptrs().emplace(static_cast<void*>(this), this);
 	}
-
 	void unregister_this() {
 		all_ptrs().erase(static_cast<void*>(this));
 	}
@@ -235,7 +234,7 @@ public:
 	GcPtr() = default;
 
 	template <typename... Args>
-	explicit GcPtr(Args&&... args) {
+	GcPtr(std::in_place_t, Args&&... args) {
 		void* raw = allocate_with_retry([] { return operator new(sizeof(T)); });
 		T* ptr = static_cast<T*>(raw);
 
@@ -336,7 +335,6 @@ public:
 	static void set_gc_interval(std::chrono::seconds t) {
 		GcPtrBase::set_gc_interval(t);
 	}
-
 	static void set_destruct_threshold(std::size_t n) {
 		GcPtrBase::set_destruct_threshold(n);
 	}
@@ -344,11 +342,15 @@ public:
 	friend bool operator==(const GcPtr& a, const GcPtr& b) {
 		return a.object_ptr == b.object_ptr;
 	}
-
 	friend bool operator!=(const GcPtr& a, const GcPtr& b) {
 		return a.object_ptr != b.object_ptr;
 	}
 };
+
+template <typename T, typename... Args>
+GcPtr<T> make_gc(Args&&... args) {
+	return GcPtr<T>(std::in_place, std::forward<Args>(args)...);
+}
 
 template <typename T>
 void swap(GcPtr<T>& a, GcPtr<T>& b) noexcept {

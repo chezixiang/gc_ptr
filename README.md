@@ -17,8 +17,11 @@
 ```cpp
 #include "gc_ptr.hpp"
 
-// 创建对象
-GcPtr<MyClass> obj(arg1, arg2);
+// 使用工厂函数创建对象
+auto obj = make_gc<MyClass>(arg1, arg2);
+
+// 或者使用 in_place 构造（不推荐直接使用，优先用 make_gc）
+GcPtr<MyClass> obj2(std::in_place, arg1, arg2);
 
 // 使用类似指针的方式访问成员
 obj->method();
@@ -37,8 +40,8 @@ GcPtr<MyClass>::set_destruct_threshold(100);
 gc_ptr 自动处理循环引用，无需手动 break 引用链：
 
 ```cpp
-GcPtr<Node> a;
-GcPtr<Node> b;
+auto a = make_gc<Node>();
+auto b = make_gc<Node>();
 a->next = b;
 b->prev = a;
 // 无需手动处理，垃圾回收会自动清理
@@ -53,10 +56,14 @@ b->prev = a;
 #### 构造函数
 
 - `GcPtr()` - 默认构造函数，创建空指针
-- `GcPtr(Args&&... args)` - 构造并初始化对象
+- `GcPtr(std::in_place_t, Args&&... args)` - 构造并初始化对象（推荐使用 `make_gc`）
 - `GcPtr(const T* p)` - 从原始指针构造
 - `GcPtr(const GcPtr& other)` - 拷贝构造
 - `GcPtr(GcPtr&& other)` - 移动构造
+
+#### 工厂函数
+
+- `template <typename T, typename... Args> GcPtr<T> make_gc(Args&&... args)` - 推荐创建 GcPtr 对象的工厂函数
 
 #### 成员函数
 
@@ -89,6 +96,25 @@ b->prev = a;
 - 对象注册表：使用 std::map 管理所有 GC 对象
 - 引用扫描：扫描每个 GC 对象内存区域寻找内部指针
 - 标记-清除：标准的标记清除算法
+
+## 构建和测试
+
+项目使用 Makefile 构建和测试。确保系统上有 g++ 和 GTest。
+
+### 构建和运行测试:
+```bash
+make
+```
+
+或者显式运行测试:
+```bash
+make test
+```
+
+清理构建产物:
+```bash
+make clean
+```
 
 ## 许可证
 

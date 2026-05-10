@@ -46,16 +46,11 @@ Release/
 # IDE
 .vs/
 .vscode/
+.trae
 *.suo
 *.user
 *.userosscache
 *.sln.docstates
-
-# CMake
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
 
 # Backup files
 *.bak
