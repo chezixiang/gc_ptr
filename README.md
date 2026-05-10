@@ -1,14 +1,14 @@
-# gc\_ptr
+# gc_ptr
 
 一个用 C++ 实现的垃圾回收智能指针库。
 
 ## 功能特性
 
 - 自动垃圾回收：使用标记-清除算法自动回收不可达对象
-- 标记-清除算法：自动检测并回收循环引用
-- 自动垃圾回收触发：可配置定时回收或析构计数阈值回收
-- 异常安全：提供异常安全保证
-- 简单易用的接口
+- 循环引用处理：自动检测并回收循环引用
+- 自动触发：可配置定时回收或析构计数阈值回收
+- 线程安全：多线程模式下提供基本线程安全保证
+- 与 `std::shared_ptr` 兼容的 `reset()`/`release()` 接口
 
 ## 使用方法
 
@@ -19,9 +19,6 @@
 
 // 使用工厂函数创建对象
 auto obj = make_gc<MyClass>(arg1, arg2);
-
-// 或者使用 in_place 构造（不推荐直接使用，优先用 make_gc）
-GcPtr<MyClass> obj2(std::in_place, arg1, arg2);
 
 // 使用类似指针的方式访问成员
 obj->method();
@@ -37,7 +34,7 @@ GcPtr<MyClass>::set_destruct_threshold(100);
 
 ### 循环引用支持
 
-gc\_ptr 自动处理循环引用，无需手动 break 引用链：
+gc_ptr 自动处理循环引用，无需手动断开引用链：
 
 ```cpp
 auto a = make_gc<Node>();
@@ -56,26 +53,26 @@ b->prev = a;
 #### 构造函数
 
 - `GcPtr()` - 默认构造函数，创建空指针
-- `GcPtr(std::in_place_t, Args&&... args)` - 构造并初始化对象（推荐使用 `make_gc`）
-- `GcPtr(const T* p)` - 从原始指针构造
+- `GcPtr(std::in_place_t, Args&&... args)` - 原地构造并初始化对象
+- `GcPtr(T* p)` - 从原始指针构造（接管所有权）
 - `GcPtr(const GcPtr& other)` - 拷贝构造
 - `GcPtr(GcPtr&& other)` - 移动构造
 
 #### 工厂函数
 
-- `template <typename T, typename... Args> GcPtr<T> make_gc(Args&&... args)` - 推荐创建 GcPtr 对象的工厂函数
+- `template <typename T, typename... Args> GcPtr<T> make_gc(Args&&... args)` - 推荐的创建方式
 
 #### 成员函数
 
-- `void reset()` - 将当前对象置空并删除此前保存的对象
-- `T* reset(T* new_ptr)` - 重置为新对象
+- `void reset()` - 立即销毁当前对象并置空
+- `void reset(T* new_ptr)` - 销毁当前对象并接管新指针的所有权
+- `T* release()` - 释放所有权，返回原始指针。对象不再由 GC 管理，调用者需手动 `delete`
 - `void swap(GcPtr& other)` - 交换内容
 - `T& operator*()` / `const T& operator*() const` - 解引用
 - `T* operator->()` / `const T* operator->() const` - 成员访问
 - `T* get()` / `const T* get() const` - 获取原始指针
 - `explicit operator bool() const` - 检查是否为空
 - `void gc()` - 显式触发垃圾回收
-- `T* release()` - 释放当前对象，返回原始指针，对象不再由 GC 管控，调用者必须手动 delete 返回的指针以避免内存泄漏
 
 #### 静态成员函数
 
@@ -92,31 +89,30 @@ b->prev = a;
 
 ## 实现细节
 
-- 根对象检测：自动检测栈上的 GcPtr 作为根
-- 对象注册表：使用 std::map 管理所有 GC 对象
-- 引用扫描：扫描每个 GC 对象内存区域寻找内部指针
-- 标记-清除：标准的标记清除算法
+- 根对象检测：栈上的 GcPtr 自动识别为 GC 根
+- 对象注册表：使用 `std::map` 和排序区间表管理所有 GC 对象
+- 引用扫描：在 GC 对象内存区域内扫描内部 GcPtr 成员
+- 标记-清除：标准的标记清除算法，支持循环引用回收
+- 线程安全：定义 `GPTR_THREAD` 宏后启用
+  - 递归互斥锁保护内部数据结构（`gc_objects`、`all_ptrs`、`gc_ranges`）
+  - 读写锁（`std::shared_mutex`）保护对象访问：`operator->`/`operator*`/`get()` 持共享锁，`collect()` 持独占锁，确保 GC 期间不会出现 use‑after‑free
+
+## 注意事项
+
+- `reset()` 检查是否存在其他 `GcPtr` 指向同一对象：若仅有当前指针持有该对象，则立即销毁（保持与 `std::shared_ptr::reset()` 兼容）；若存在其他共享引用，则仅将当前指针置空，由 GC 后续回收该对象。
+- `release()` 将对象移出 GC 管理，调用者负责手动 `delete`。释放后的对象不可再交给其他 `GcPtr` 管理。
+- 多线程模式下，`collect()` 采用读写锁实现 stop‑the‑world 语义：GC 回收期间所有 `operator->` / `operator*` / `get()` 访问将阻塞，确保不会出现 use‑after‑free。持有 `operator->` 返回的裸指针跨越 GC 周期是不安全的。
+- 自定义 `deleter` 不应抛出异常；若必须抛出，对象在 deleter 调用前已从 GC 注册表中移除，保证 GC 状态一致性。
+- 根检测依赖编译器和平台的对象布局，对于非标准内存布局可能存在局限。
 
 ## 构建和测试
 
-项目使用 Makefile 构建和测试。确保系统上有 g++ 和 GTest。
-
-### 构建和运行测试:
+项目使用 Makefile 构建和测试。需要 g++ 和 GTest。
 
 ```bash
-make
-```
-
-或者显式运行测试:
-
-```bash
-make test
-```
-
-清理构建产物:
-
-```bash
-make clean
+make        # 构建测试
+make test   # 构建并运行测试
+make clean  # 清理
 ```
 
 ## 许可证

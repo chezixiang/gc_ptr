@@ -1,8 +1,10 @@
 #ifndef GC_PTR_HPP
 #define GC_PTR_HPP
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <new>
@@ -12,8 +14,9 @@
 #include <vector>
 
 #ifdef GPTR_THREAD
-#include <mutex>
 #include <atomic>
+#include <mutex>
+#include <shared_mutex>
 #endif
 
 class GcPtrBase {
@@ -27,20 +30,22 @@ protected:
 		check_auto_gc();
 	}
 
-	GcPtrBase(const GcPtrBase&) {
+	GcPtrBase(const GcPtrBase& other) {
+		(void)other;
 		is_root = !is_within_any_gc_object(this);
 		register_this();
 		check_auto_gc();
 	}
 
-	GcPtrBase(GcPtrBase&&) noexcept {
+	GcPtrBase(GcPtrBase&& other) noexcept {
+		(void)other;
 		is_root = !is_within_any_gc_object(this);
 		register_this();
 		check_auto_gc();
 	}
 
-	GcPtrBase& operator=(const GcPtrBase&) = default;
-	GcPtrBase& operator=(GcPtrBase&&) = default;
+	GcPtrBase& operator=(const GcPtrBase&) = delete;
+	GcPtrBase& operator=(GcPtrBase&&) = delete;
 
 	~GcPtrBase() {
 		unregister_this();
@@ -59,14 +64,28 @@ protected:
 		return objects;
 	}
 
-	static std::map<void*, GcPtrBase*>& all_ptrs() {
-		static std::map<void*, GcPtrBase*> pointers;
+	static std::map<uintptr_t, GcPtrBase*>& all_ptrs() {
+		static std::map<uintptr_t, GcPtrBase*> pointers;
 		return pointers;
 	}
 
+	static std::vector<std::pair<uintptr_t, uintptr_t>>& gc_ranges() {
+		static std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
+		return ranges;
+	}
+
+	static bool& gc_ranges_dirty() {
+		static bool dirty = true;
+		return dirty;
+	}
+
 #ifdef GPTR_THREAD
-	static std::mutex& gc_mutex() {
-		static std::mutex mtx;
+	static std::recursive_mutex& gc_mutex() {
+		static std::recursive_mutex mtx;
+		return mtx;
+	}
+	static std::shared_mutex& gc_access_mutex() {
+		static std::shared_mutex mtx;
 		return mtx;
 	}
 #endif
@@ -74,30 +93,55 @@ protected:
 	static void register_gc_object(void* p, std::size_t sz,
 								   std::function<void()> d) {
 #ifdef GPTR_THREAD
-		std::lock_guard<std::mutex> lock(gc_mutex());
+		std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
 		gc_objects().emplace(p, GcNode{p, sz, false, std::move(d)});
+		gc_ranges_dirty() = true;
 	}
 
 	static void unregister_gc_object(void* p) {
 #ifdef GPTR_THREAD
-		std::lock_guard<std::mutex> lock(gc_mutex());
+		std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
 		gc_objects().erase(p);
+		gc_ranges_dirty() = true;
+	}
+
+	static int count_references(void* obj) {
+		int count = 0;
+		for (const auto& [_, base] : all_ptrs()) {
+			if (base->object_ptr == obj)
+				++count;
+		}
+		return count;
+	}
+
+	static void rebuild_ranges() {
+		gc_ranges().clear();
+		for (const auto& [addr, node] : gc_objects()) {
+			auto begin = reinterpret_cast<uintptr_t>(addr);
+			gc_ranges().emplace_back(begin, begin + node.size);
+		}
+		std::sort(gc_ranges().begin(), gc_ranges().end());
+		gc_ranges_dirty() = false;
 	}
 
 	static bool is_within_any_gc_object(const void* addr) {
 #ifdef GPTR_THREAD
-		std::lock_guard<std::mutex> lock(gc_mutex());
+		std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-		for (const auto& [obj_addr, node] : gc_objects()) {
-			const char* begin = static_cast<const char*>(obj_addr);
-			const char* end = begin + node.size;
-			const char* caddr = static_cast<const char*>(addr);
-			if (caddr >= begin && caddr < end)
-				return true;
-		}
-		return false;
+		if (gc_ranges_dirty())
+			rebuild_ranges();
+
+		auto target = reinterpret_cast<uintptr_t>(addr);
+		auto it = std::lower_bound(
+			gc_ranges().begin(), gc_ranges().end(), target,
+			[](const std::pair<uintptr_t, uintptr_t>& range, uintptr_t val) {
+				return range.second <= val;
+			});
+		if (it == gc_ranges().end())
+			return false;
+		return target >= it->first && target < it->second;
 	}
 
 	static std::size_t destruct_count;
@@ -116,7 +160,7 @@ protected:
 		bool should_collect = false;
 		{
 #ifdef GPTR_THREAD
-			std::lock_guard<std::mutex> lock(gc_mutex());
+			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
 			if (!time_initialized) {
 				last_gc_time = std::chrono::steady_clock::now();
@@ -138,7 +182,7 @@ protected:
 		bool should_collect = false;
 		{
 #ifdef GPTR_THREAD
-			std::lock_guard<std::mutex> lock(gc_mutex());
+			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
 			++destruct_count;
 			if (destruct_count >= destruct_threshold) {
@@ -191,13 +235,12 @@ protected:
 			auto it = gc_objects().find(cur);
 			if (it == gc_objects().end()) continue;
 
-			const char* begin = static_cast<const char*>(cur);
-			const char* end = begin + it->second.size;
+			auto begin_addr = reinterpret_cast<uintptr_t>(cur);
+			auto end_addr = begin_addr + it->second.size;
 
-			auto ptr_it = all_ptrs().lower_bound(const_cast<char*>(begin));
+			auto ptr_it = all_ptrs().lower_bound(begin_addr);
 			for (; ptr_it != all_ptrs().end(); ++ptr_it) {
-				const char* ptr_addr = static_cast<const char*>(ptr_it->first);
-				if (ptr_addr >= end) break;
+				if (ptr_it->first >= end_addr) break;
 
 				GcPtrBase* inner = ptr_it->second;
 				if (!inner->object_ptr) continue;
@@ -223,8 +266,10 @@ protected:
 		for (void* addr : to_delete) {
 			auto it = gc_objects().find(addr);
 			if (it != gc_objects().end()) {
-				it->second.deleter();
+				auto deleter = std::move(it->second.deleter);
 				gc_objects().erase(it);
+				gc_ranges_dirty() = true;
+				deleter();
 			}
 		}
 	}
@@ -234,6 +279,7 @@ public:
 #ifdef GPTR_THREAD
 		if (gc_in_progress.exchange(true, std::memory_order_acq_rel))
 			return;
+		std::unique_lock<std::shared_mutex> access_lock(gc_access_mutex());
 #else
 		if (gc_in_progress)
 			return;
@@ -241,16 +287,13 @@ public:
 #endif
 
 		try {
-			std::vector<void*> to_delete;
-			{
 #ifdef GPTR_THREAD
-				std::lock_guard<std::mutex> lock(gc_mutex());
+			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-				reset_all_marks();
-				std::vector<void*> queue = collect_root_objects();
-				mark_reachable_objects(queue);
-				to_delete = collect_unmarked_objects();
-			}
+			reset_all_marks();
+			std::vector<void*> queue = collect_root_objects();
+			mark_reachable_objects(queue);
+			std::vector<void*> to_delete = collect_unmarked_objects();
 			delete_unmarked_objects(to_delete);
 		} catch (...) {
 #ifdef GPTR_THREAD
@@ -269,7 +312,7 @@ public:
 
 	static void set_gc_interval(std::chrono::seconds interval) {
 #ifdef GPTR_THREAD
-		std::lock_guard<std::mutex> lock(gc_mutex());
+		std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
 		gc_interval = interval;
 		time_initialized = false;
@@ -277,7 +320,7 @@ public:
 
 	static void set_destruct_threshold(std::size_t threshold) {
 #ifdef GPTR_THREAD
-		std::lock_guard<std::mutex> lock(gc_mutex());
+		std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
 		destruct_threshold = threshold;
 	}
@@ -285,28 +328,28 @@ public:
 private:
 	void register_this() {
 #ifdef GPTR_THREAD
-		std::lock_guard<std::mutex> lock(gc_mutex());
+		std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-		all_ptrs().emplace(static_cast<void*>(this), this);
+		all_ptrs().emplace(reinterpret_cast<uintptr_t>(this), this);
 	}
 	void unregister_this() {
 #ifdef GPTR_THREAD
-		std::lock_guard<std::mutex> lock(gc_mutex());
+		std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-		all_ptrs().erase(static_cast<void*>(this));
+		all_ptrs().erase(reinterpret_cast<uintptr_t>(this));
 	}
 };
 
-std::size_t GcPtrBase::destruct_count = 0;
-std::size_t GcPtrBase::destruct_threshold = 40;
-std::chrono::seconds GcPtrBase::gc_interval(120);
-std::chrono::steady_clock::time_point GcPtrBase::last_gc_time{};
-bool GcPtrBase::time_initialized = false;
+inline std::size_t GcPtrBase::destruct_count = 0;
+inline std::size_t GcPtrBase::destruct_threshold = 40;
+inline std::chrono::seconds GcPtrBase::gc_interval(120);
+inline std::chrono::steady_clock::time_point GcPtrBase::last_gc_time{};
+inline bool GcPtrBase::time_initialized = false;
 
 #ifdef GPTR_THREAD
-std::atomic<bool> GcPtrBase::gc_in_progress{false};
+inline std::atomic<bool> GcPtrBase::gc_in_progress{false};
 #else
-bool GcPtrBase::gc_in_progress = false;
+inline bool GcPtrBase::gc_in_progress = false;
 #endif
 
 template <typename T>
@@ -319,23 +362,23 @@ public:
 		void* raw = allocate_with_retry([] { return operator new(sizeof(T)); });
 		T* ptr = static_cast<T*>(raw);
 
-		// 先注册到 GC，这样对象内部的 GcPtr 成员能正确检测根对象
 		{
 #ifdef GPTR_THREAD
-			std::lock_guard<std::mutex> lock(gc_mutex());
+			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
 			gc_objects().emplace(ptr, GcNode{ptr, sizeof(T), false, [ptr] { delete ptr; }});
+			gc_ranges_dirty() = true;
 		}
 
 		try {
 			new (ptr) T(std::forward<Args>(args)...);
 		} catch (...) {
-			// 清理已注册的对象
 			{
 #ifdef GPTR_THREAD
-				std::lock_guard<std::mutex> lock(gc_mutex());
+				std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
 				gc_objects().erase(ptr);
+				gc_ranges_dirty() = true;
 			}
 			operator delete(ptr);
 			throw;
@@ -348,14 +391,13 @@ public:
 	explicit GcPtr(T* p) {
 		if (p) {
 #ifdef GPTR_THREAD
-			std::lock_guard<std::mutex> lock(gc_mutex());
+			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-			// 检查指针是否已注册
 			if (gc_objects().find(p) != gc_objects().end()) {
 				throw std::runtime_error("Pointer already registered with GC");
 			}
-			// 直接注册，避免再次加锁
 			gc_objects().emplace(p, GcNode{p, sizeof(T), false, [p] { delete p; }});
+			gc_ranges_dirty() = true;
 		}
 		object_ptr = p;
 		is_root = true;
@@ -390,13 +432,20 @@ public:
 	void reset() {
 		T* old_ptr = static_cast<T*>(object_ptr);
 		if (old_ptr) {
+			bool should_delete = false;
 			{
 #ifdef GPTR_THREAD
-				std::lock_guard<std::mutex> lock(gc_mutex());
+				std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-				gc_objects().erase(old_ptr);
+				if (count_references(old_ptr) <= 1) {
+					gc_objects().erase(old_ptr);
+					gc_ranges_dirty() = true;
+					should_delete = true;
+				}
 			}
-			delete old_ptr;
+			if (should_delete) {
+				delete old_ptr;
+			}
 			object_ptr = nullptr;
 		}
 	}
@@ -405,48 +454,40 @@ public:
 		if (object_ptr == new_ptr) {
 			return;
 		}
-		
+
 		T* old_ptr = static_cast<T*>(object_ptr);
-		
+
 		if (new_ptr) {
-			// 先获取锁处理注册和注销
+#ifdef GPTR_THREAD
+			std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
+			auto [it, inserted] = gc_objects().emplace(new_ptr, GcNode{new_ptr, sizeof(T), false, [new_ptr] { delete new_ptr; }});
+			if (!inserted) {
+				throw std::runtime_error("Pointer already registered with GC");
+			}
+			gc_ranges_dirty() = true;
+		}
+
+		object_ptr = new_ptr;
+
+		if (old_ptr) {
+			bool should_delete = false;
 			{
 #ifdef GPTR_THREAD
-				std::lock_guard<std::mutex> lock(gc_mutex());
+				std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-				// 检查新指针是否已注册
-				if (gc_objects().find(new_ptr) != gc_objects().end()) {
-					throw std::runtime_error("Pointer already registered with GC");
-				}
-				// 如果有旧指针，先注销
-				if (old_ptr) {
+				if (count_references(old_ptr) <= 1) {
 					gc_objects().erase(old_ptr);
+					gc_ranges_dirty() = true;
+					should_delete = true;
 				}
-				// 直接注册，避免再次加锁
-				gc_objects().emplace(new_ptr, GcNode{new_ptr, sizeof(T), false, [new_ptr] { delete new_ptr; }});
 			}
-			object_ptr = new_ptr;
-			// 在锁外删除旧对象
-			if (old_ptr) {
+			if (should_delete) {
 				delete old_ptr;
-			}
-		} else {
-			// 置空，先处理旧指针
-			if (old_ptr) {
-				{
-#ifdef GPTR_THREAD
-					std::lock_guard<std::mutex> lock(gc_mutex());
-#endif
-					gc_objects().erase(old_ptr);
-				}
-				delete old_ptr;
-				object_ptr = nullptr;
 			}
 		}
 	}
 
-	// 释放所有权，返回原始指针。
-	// 警告：对象不再由 GC 管控，调用者必须手动 delete 返回的指针，否则会导致内存泄漏！
 	T* release() {
 		T* old_ptr = static_cast<T*>(object_ptr);
 		if (old_ptr) {
@@ -463,24 +504,46 @@ public:
 
 	T& operator*() { 
 		assert(object_ptr && "dereferencing null GcPtr");
+#ifdef GPTR_THREAD
+		std::shared_lock<std::shared_mutex> lock(gc_access_mutex());
+#endif
 		return *static_cast<T*>(object_ptr); 
 	}
 	const T& operator*() const { 
 		assert(object_ptr && "dereferencing null GcPtr");
-		return *static_cast<T*>(object_ptr); 
+#ifdef GPTR_THREAD
+		std::shared_lock<std::shared_mutex> lock(gc_access_mutex());
+#endif
+		return *static_cast<const T*>(object_ptr); 
 	}
 
 	T* operator->() { 
 		assert(object_ptr && "dereferencing null GcPtr");
+#ifdef GPTR_THREAD
+		std::shared_lock<std::shared_mutex> lock(gc_access_mutex());
+#endif
 		return static_cast<T*>(object_ptr); 
 	}
 	const T* operator->() const { 
 		assert(object_ptr && "dereferencing null GcPtr");
-		return static_cast<T*>(object_ptr); 
+#ifdef GPTR_THREAD
+		std::shared_lock<std::shared_mutex> lock(gc_access_mutex());
+#endif
+		return static_cast<const T*>(object_ptr); 
 	}
 
-	T* get() { return static_cast<T*>(object_ptr); }
-	const T* get() const { return static_cast<T*>(object_ptr); }
+	T* get() { 
+#ifdef GPTR_THREAD
+		std::shared_lock<std::shared_mutex> lock(gc_access_mutex());
+#endif
+		return static_cast<T*>(object_ptr); 
+	}
+	const T* get() const { 
+#ifdef GPTR_THREAD
+		std::shared_lock<std::shared_mutex> lock(gc_access_mutex());
+#endif
+		return static_cast<const T*>(object_ptr); 
+	}
 
 	explicit operator bool() const { return object_ptr != nullptr; }
 
