@@ -10,6 +10,11 @@
 #include <utility>
 #include <vector>
 
+#ifdef GPTR_THREAD
+#include <mutex>
+#include <atomic>
+#endif
+
 class GcPtrBase {
 protected:
 	void* object_ptr = nullptr;
@@ -58,16 +63,32 @@ protected:
 		return pointers;
 	}
 
+#ifdef GPTR_THREAD
+	static std::mutex& gc_mutex() {
+		static std::mutex mtx;
+		return mtx;
+	}
+#endif
+
 	static void register_gc_object(void* p, std::size_t sz,
 								   std::function<void()> d) {
+#ifdef GPTR_THREAD
+		std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
 		gc_objects().emplace(p, GcNode{p, sz, false, std::move(d)});
 	}
 
 	static void unregister_gc_object(void* p) {
+#ifdef GPTR_THREAD
+		std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
 		gc_objects().erase(p);
 	}
 
 	static bool is_within_any_gc_object(const void* addr) {
+#ifdef GPTR_THREAD
+		std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
 		for (const auto& [obj_addr, node] : gc_objects()) {
 			const char* begin = static_cast<const char*>(obj_addr);
 			const char* end = begin + node.size;
@@ -84,26 +105,48 @@ protected:
 	static std::chrono::steady_clock::time_point last_gc_time;
 	static bool time_initialized;
 
+#ifdef GPTR_THREAD
+	static std::atomic<bool> gc_in_progress;
+#else
 	static bool gc_in_progress;
+#endif
 
 	static void check_auto_gc() {
-		if (!time_initialized) {
-			last_gc_time = std::chrono::steady_clock::now();
-			time_initialized = true;
-			return;
+		bool should_collect = false;
+		{
+#ifdef GPTR_THREAD
+			std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+			if (!time_initialized) {
+				last_gc_time = std::chrono::steady_clock::now();
+				time_initialized = true;
+				return;
+			}
+			const auto now = std::chrono::steady_clock::now();
+			if (now - last_gc_time >= gc_interval) {
+				should_collect = true;
+				last_gc_time = now;
+			}
 		}
-		const auto now = std::chrono::steady_clock::now();
-		if (now - last_gc_time >= gc_interval) {
+		if (should_collect) {
 			collect();
-			last_gc_time = now;
 		}
 	}
 
 	static void auto_collect_on_destruct() {
-		++destruct_count;
-		if (destruct_count >= destruct_threshold) {
+		bool should_collect = false;
+		{
+#ifdef GPTR_THREAD
+			std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+			++destruct_count;
+			if (destruct_count >= destruct_threshold) {
+				should_collect = true;
+				destruct_count = 0;
+			}
+		}
+		if (should_collect) {
 			collect();
-			destruct_count = 0;
 		}
 		check_auto_gc();
 	}
@@ -187,36 +230,68 @@ protected:
 
 public:
 	static void collect() {
-		if (gc_in_progress) return;
+#ifdef GPTR_THREAD
+		if (gc_in_progress.exchange(true, std::memory_order_acquire))
+			return;
+#else
+		if (gc_in_progress)
+			return;
 		gc_in_progress = true;
+#endif
 
 		try {
-			reset_all_marks();
-			std::vector<void*> queue = collect_root_objects();
-			mark_reachable_objects(queue);
-			std::vector<void*> to_delete = collect_unmarked_objects();
+			std::vector<void*> to_delete;
+			{
+#ifdef GPTR_THREAD
+				std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+				reset_all_marks();
+				std::vector<void*> queue = collect_root_objects();
+				mark_reachable_objects(queue);
+				to_delete = collect_unmarked_objects();
+			}
 			delete_unmarked_objects(to_delete);
 		} catch (...) {
+#ifdef GPTR_THREAD
+			gc_in_progress.store(false, std::memory_order_release);
+#else
 			gc_in_progress = false;
+#endif
 			throw;
 		}
+#ifdef GPTR_THREAD
+		gc_in_progress.store(false, std::memory_order_release);
+#else
 		gc_in_progress = false;
+#endif
 	}
 
 	static void set_gc_interval(std::chrono::seconds interval) {
+#ifdef GPTR_THREAD
+		std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
 		gc_interval = interval;
 		time_initialized = false;
 	}
 
 	static void set_destruct_threshold(std::size_t threshold) {
+#ifdef GPTR_THREAD
+		std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
 		destruct_threshold = threshold;
 	}
 
 private:
 	void register_this() {
+#ifdef GPTR_THREAD
+		std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
 		all_ptrs().emplace(static_cast<void*>(this), this);
 	}
 	void unregister_this() {
+#ifdef GPTR_THREAD
+		std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
 		all_ptrs().erase(static_cast<void*>(this));
 	}
 };
@@ -226,7 +301,12 @@ std::size_t GcPtrBase::destruct_threshold = 40;
 std::chrono::seconds GcPtrBase::gc_interval(120);
 std::chrono::steady_clock::time_point GcPtrBase::last_gc_time{};
 bool GcPtrBase::time_initialized = false;
+
+#ifdef GPTR_THREAD
+std::atomic<bool> GcPtrBase::gc_in_progress{false};
+#else
 bool GcPtrBase::gc_in_progress = false;
+#endif
 
 template <typename T>
 class GcPtr : private GcPtrBase {

@@ -237,6 +237,119 @@ TEST_F(GcPtrTest, Should_CompareEquality) {
     EXPECT_TRUE(ptr1 != ptr2);
 }
 
+TEST_F(GcPtrTest, Should_ConstructFromNullptr) {
+    GcPtr<int> ptr(nullptr);
+    EXPECT_FALSE(ptr);
+    EXPECT_EQ(ptr.get(), nullptr);
+}
+
+TEST_F(GcPtrTest, Should_SelfAssignCopy) {
+    auto ptr = make_gc<int>(42);
+    ptr = ptr;  // 自赋值
+    EXPECT_TRUE(ptr);
+    EXPECT_EQ(*ptr, 42);
+}
+
+TEST_F(GcPtrTest, Should_SelfAssignMove) {
+    auto ptr = make_gc<int>(42);
+    // 抑制自移动警告，因为我们确实想测试这种边缘情况
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wself-move"
+    ptr = std::move(ptr);  // 自移动赋值
+    #pragma GCC diagnostic pop
+    // 移动后的状态可能为空，或保持原值，取决于实现
+    // 这里我们只检查程序不崩溃
+}
+
+struct ThrowInConstructor {
+    static int throw_count;
+    ThrowInConstructor() { throw_count++; throw std::runtime_error("test"); }
+};
+int ThrowInConstructor::throw_count = 0;
+
+TEST_F(GcPtrTest, Should_HandleExceptionInConstructor) {
+    ThrowInConstructor::throw_count = 0;
+    EXPECT_THROW({
+        auto ptr = make_gc<ThrowInConstructor>();
+    }, std::runtime_error);
+    EXPECT_EQ(ThrowInConstructor::throw_count, 1);
+}
+
+TEST_F(GcPtrTest, Should_SetAndGetDestructThreshold) {
+    GcPtr<int>::set_destruct_threshold(100);
+    GcPtr<int>::set_destruct_threshold(200);  // 只是测试不会崩溃
+    // 恢复默认值
+    GcPtr<int>::set_destruct_threshold(1000);
+}
+
+struct ReentrantGc : public Counted {
+    GcPtr<ReentrantGc> ptr;
+    ReentrantGc() : Counted() {}
+    ~ReentrantGc() {
+        // 析构时尝试再次GC
+        GcPtrBase::collect();
+    }
+};
+
+TEST_F(GcPtrTest, Should_ProtectAgainstReentrantGc) {
+    ReentrantGc::counter = 0;
+    {
+        auto obj = make_gc<ReentrantGc>();
+        obj->ptr = make_gc<ReentrantGc>();
+        EXPECT_EQ(ReentrantGc::counter, 2);
+    }
+    GcPtrBase::collect();
+    EXPECT_EQ(ReentrantGc::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_ResetToNullptr) {
+    auto ptr = make_gc<int>(42);
+    ptr.reset(nullptr);
+    EXPECT_FALSE(ptr);
+}
+
+TEST_F(GcPtrTest, Should_ConstructWithMultipleArgs) {
+    struct MultiArg {
+        int a;
+        std::string b;
+        double c;
+        MultiArg(int x, std::string y, double z) : a(x), b(y), c(z) {}
+    };
+    auto ptr = make_gc<MultiArg>(42, "test", 3.14);
+    EXPECT_EQ(ptr->a, 42);
+    EXPECT_EQ(ptr->b, "test");
+    EXPECT_EQ(ptr->c, 3.14);
+}
+
+#ifdef GPTR_THREAD
+#include <thread>
+#include <vector>
+
+TEST_F(GcPtrTest, Should_WorkInMultiThreadedEnvironment) {
+    Counted::counter = 0;
+    std::vector<std::thread> threads;
+    
+    for (int i = 0; i < 10; ++i) {
+        threads.emplace_back([] {
+            for (int j = 0; j < 100; ++j) {
+                auto ptr = make_gc<Counted>(j);
+                GcPtr<Counted> copy(ptr);
+                GcPtr<Counted> moved(std::move(copy));
+            }
+            GcPtrBase::collect();
+        });
+    }
+    
+    for (auto& t : threads) {
+        t.join();
+    }
+    
+    GcPtrBase::collect();
+    // 所有线程完成后不应该有残留对象
+    EXPECT_EQ(Counted::counter, 0);
+}
+#endif
+
 }
 
 int main(int argc, char **argv) {
