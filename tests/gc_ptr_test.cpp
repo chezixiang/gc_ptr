@@ -84,10 +84,26 @@ TEST_F(GcPtrTest, Should_MoveAssign) {
 
 TEST_F(GcPtrTest, Should_ResetToNull) {
     auto ptr = make_gc<int>(42);
-    int* old = ptr.reset();
+    ptr.reset();
     EXPECT_FALSE(ptr);
-    // 原始设计中 reset() 会 unregister，所以我们只需要 delete
-    delete old;
+}
+
+TEST_F(GcPtrTest, Should_ResetAndCallDestructor) {
+    EXPECT_EQ(Counted::counter, 0);
+    auto ptr = make_gc<Counted>(123);
+    EXPECT_EQ(Counted::counter, 1);
+    ptr.reset();
+    EXPECT_FALSE(ptr);
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_ResetToNewObject) {
+    EXPECT_EQ(Counted::counter, 0);
+    auto ptr = make_gc<Counted>(123);
+    EXPECT_EQ(Counted::counter, 1);
+    ptr.reset(new Counted(456));
+    EXPECT_EQ(Counted::counter, 1);
+    EXPECT_EQ(ptr->value, 456);
 }
 
 TEST_F(GcPtrTest, Should_Swap) {

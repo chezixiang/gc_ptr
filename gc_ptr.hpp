@@ -234,7 +234,7 @@ public:
 	GcPtr() = default;
 
 	template <typename... Args>
-	GcPtr(std::in_place_t, Args&&... args) {
+	explicit GcPtr(std::in_place_t, Args&&... args) {
 		void* raw = allocate_with_retry([] { return operator new(sizeof(T)); });
 		T* ptr = static_cast<T*>(raw);
 
@@ -287,22 +287,21 @@ public:
 
 	~GcPtr() = default;
 
-	T* reset() {
+	void reset() {
 		T* p = static_cast<T*>(object_ptr);
 		if (p) {
 			unregister_gc_object(p);
+			delete p;
 			object_ptr = nullptr;
 		}
-		return p;
 	}
 
-	T* reset(T* new_ptr) {
-		T* old = reset();
+	void reset(T* new_ptr) {
+		reset();
 		if (new_ptr) {
 			register_gc_object(new_ptr, sizeof(T), [new_ptr] { delete new_ptr; });
 			object_ptr = new_ptr;
 		}
-		return old;
 	}
 
 	void swap(GcPtr& other) noexcept {
