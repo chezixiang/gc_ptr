@@ -231,7 +231,7 @@ protected:
 public:
 	static void collect() {
 #ifdef GPTR_THREAD
-		if (gc_in_progress.exchange(true, std::memory_order_acquire))
+		if (gc_in_progress.exchange(true, std::memory_order_acq_rel))
 			return;
 #else
 		if (gc_in_progress)

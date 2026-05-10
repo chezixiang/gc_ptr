@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
-#include "../gc_ptr.hpp"
 #include <string>
 #include <memory>
+#ifdef GPTR_THREAD
+#include <thread>
+#include <vector>
+#endif
+#include "../gc_ptr.hpp"
 
 namespace {
 
@@ -322,8 +326,6 @@ TEST_F(GcPtrTest, Should_ConstructWithMultipleArgs) {
 }
 
 #ifdef GPTR_THREAD
-#include <thread>
-#include <vector>
 
 TEST_F(GcPtrTest, Should_WorkInMultiThreadedEnvironment) {
     Counted::counter = 0;
