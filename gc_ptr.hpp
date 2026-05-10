@@ -450,7 +450,12 @@ public:
 	T* release() {
 		T* old_ptr = static_cast<T*>(object_ptr);
 		if (old_ptr) {
-			unregister_gc_object(old_ptr);
+			{
+#ifdef GPTR_THREAD
+				std::lock_guard<std::mutex> lock(gc_mutex());
+#endif
+				gc_objects().erase(old_ptr);
+			}
 			object_ptr = nullptr;
 		}
 		return old_ptr;

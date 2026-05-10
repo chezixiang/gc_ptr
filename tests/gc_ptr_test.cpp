@@ -331,7 +331,7 @@ TEST_F(GcPtrTest, Should_WorkInMultiThreadedEnvironment) {
     Counted::counter = 0;
     std::vector<std::thread> threads;
     
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 50; ++i) {
         threads.emplace_back([] {
             for (int j = 0; j < 20; ++j) {
                 auto ptr = make_gc<Counted>(j);
