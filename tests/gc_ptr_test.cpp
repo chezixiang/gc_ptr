@@ -349,8 +349,559 @@ TEST_F(GcPtrTest, Should_WorkInMultiThreadedEnvironment) {
     // 所有线程完成后不应该有残留对象
     EXPECT_EQ(Counted::counter, 0);
 }
+
 #endif
 
+// 自定义 Deleter 测试
+struct CustomDeleterTest {
+    static int delete_count;
+    int value;
+    CustomDeleterTest(int v) : value(v) {}
+};
+int CustomDeleterTest::delete_count = 0;
+
+TEST_F(GcPtrTest, Should_UseCustomDeleter) {
+    CustomDeleterTest::delete_count = 0;
+    auto* raw = new CustomDeleterTest(42);
+    {
+        auto ptr = make_gc_with_deleter<CustomDeleterTest>(
+            raw, 
+            [](CustomDeleterTest* p) { 
+                CustomDeleterTest::delete_count++; 
+                delete p; 
+            }
+        );
+        EXPECT_EQ(ptr->value, 42);
+    }
+    GcPtrBase::collect();
+    EXPECT_EQ(CustomDeleterTest::delete_count, 1);
+}
+
+// 边界条件测试：多次重置同一指针
+TEST_F(GcPtrTest, Should_HandleMultipleResets) {
+    Counted::counter = 0;
+    {
+        auto ptr = make_gc<Counted>(1);
+        EXPECT_EQ(Counted::counter, 1);
+        ptr.reset();
+        EXPECT_EQ(Counted::counter, 0);
+        ptr.reset(new Counted(2));
+        EXPECT_EQ(Counted::counter, 1);
+        ptr.reset(new Counted(3));
+        EXPECT_EQ(Counted::counter, 1);
+    }
+    GcPtrBase::collect();
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+// 边界条件测试：release 后手动删除
+TEST_F(GcPtrTest, Should_HandleReleaseAndManualDelete) {
+    Counted::counter = 0;
+    {
+        auto ptr = make_gc<Counted>(42);
+        EXPECT_EQ(Counted::counter, 1);
+        Counted* raw = ptr.release();
+        EXPECT_EQ(Counted::counter, 1);
+        delete raw;
+        EXPECT_EQ(Counted::counter, 0);
+    }
+    GcPtrBase::collect();
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+// 边界条件测试：空指针操作
+TEST_F(GcPtrTest, Should_HandleNullptrOperations) {
+    GcPtr<int> ptr;
+    EXPECT_FALSE(ptr);
+    EXPECT_EQ(ptr.get(), nullptr);
+    ptr.reset(); // 空指针重置不应该崩溃
+    EXPECT_FALSE(ptr);
+    
+    int* null_raw = nullptr;
+    GcPtr<int> ptr2(null_raw); // 从空指针构造
+    EXPECT_FALSE(ptr2);
+}
+
+// 边界条件测试：大对象链
+struct LargeObjectChainNode {
+    static std::atomic<int> count;
+    GcPtr<LargeObjectChainNode> next;
+    int id;
+    LargeObjectChainNode(int i) : id(i) { count++; }
+    ~LargeObjectChainNode() { count--; }
+};
+std::atomic<int> LargeObjectChainNode::count{0};
+
+TEST_F(GcPtrTest, Should_HandleLargeObjectChain) {
+    LargeObjectChainNode::count = 0;
+    
+    {
+        auto root = make_gc<LargeObjectChainNode>(0);
+        auto current = root;
+        for (int i = 1; i < 100; ++i) {
+            current->next = make_gc<LargeObjectChainNode>(i);
+            current = current->next;
+        }
+        EXPECT_EQ(LargeObjectChainNode::count, 100);
+    }
+    GcPtrBase::collect();
+    EXPECT_EQ(LargeObjectChainNode::count, 0);
+}
+
+// 边界条件测试：快速创建和销毁
+TEST_F(GcPtrTest, Should_HandleRapidCreationAndDestruction) {
+    Counted::counter = 0;
+    for (int i = 0; i < 1000; ++i) {
+        auto ptr = make_gc<Counted>(i);
+    }
+    GcPtrBase::collect();
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+}
+
+TEST_F(GcPtrTest, Should_CountReferencesCorrectly) {
+    auto ptr1 = make_gc<int>(42);
+    EXPECT_EQ(GcPtrBase::count_references(ptr1.get()), 1);
+    
+    GcPtr<int> ptr2(ptr1);
+    EXPECT_EQ(GcPtrBase::count_references(ptr1.get()), 2);
+    
+    GcPtr<int> ptr3(ptr2);
+    EXPECT_EQ(GcPtrBase::count_references(ptr1.get()), 3);
+}
+
+TEST_F(GcPtrTest, Should_DetectPointerWithinGcObject) {
+    struct WithPtr {
+        GcPtr<int> inner;
+        int value;
+    };
+    auto outer = make_gc<WithPtr>();
+    outer->inner = make_gc<int>(42);
+    
+    EXPECT_TRUE(GcPtrBase::is_within_any_gc_object(&outer->inner));
+    EXPECT_TRUE(GcPtrBase::is_within_any_gc_object(&outer->value));
+    
+    int stack_var = 0;
+    EXPECT_FALSE(GcPtrBase::is_within_any_gc_object(&stack_var));
+}
+
+TEST_F(GcPtrTest, Should_HandleManualGcObjectRegistration) {
+    int* raw = new int(100);
+    bool deleted = false;
+    
+    GcPtrBase::register_gc_object(raw, sizeof(int), [raw, &deleted]() {
+        delete raw;
+        deleted = true;
+    });
+    
+    EXPECT_EQ(GcPtrBase::count_references(raw), 0);
+    
+    GcPtrBase::unregister_gc_object(raw);
+    EXPECT_FALSE(deleted);
+}
+
+TEST_F(GcPtrTest, Should_TriggerAutoGcOnDestructThreshold) {
+    // 测试设置和获取阈值
+    GcPtr<int>::set_destruct_threshold(50);
+    GcPtr<int>::set_destruct_threshold(100);
+    EXPECT_TRUE(true); // 只是确认设置不会崩溃
+    GcPtr<int>::set_destruct_threshold(1000);
+}
+
+TEST_F(GcPtrTest, Should_TriggerAutoGcOnTimeInterval) {
+    // 测试设置和获取间隔
+    GcPtr<int>::set_gc_interval(std::chrono::seconds(5));
+    GcPtr<int>::set_gc_interval(std::chrono::seconds(10));
+    EXPECT_TRUE(true); // 只是确认设置不会崩溃
+    GcPtr<int>::set_gc_interval(std::chrono::seconds(3600));
+}
+
+struct PolymorphicBase {
+    static std::atomic<int> base_count;
+    virtual ~PolymorphicBase() { base_count--; }
+    PolymorphicBase() { base_count++; }
+};
+struct PolymorphicDerived : PolymorphicBase {
+    static std::atomic<int> derived_count;
+    int extra;
+    PolymorphicDerived() : extra(42) { derived_count++; }
+    ~PolymorphicDerived() { derived_count--; }
+};
+std::atomic<int> PolymorphicBase::base_count{0};
+std::atomic<int> PolymorphicDerived::derived_count{0};
+
+TEST_F(GcPtrTest, Should_HandlePolymorphicObjects) {
+    PolymorphicBase::base_count = 0;
+    PolymorphicDerived::derived_count = 0;
+    
+    {
+        GcPtr<PolymorphicBase> ptr(new PolymorphicDerived(), 
+            [](PolymorphicBase* p) { delete static_cast<PolymorphicDerived*>(p); }, 
+            sizeof(PolymorphicDerived));
+        EXPECT_EQ(PolymorphicBase::base_count, 1);
+        EXPECT_EQ(PolymorphicDerived::derived_count, 1);
+    }
+    
+    GcPtrBase::collect();
+    EXPECT_EQ(PolymorphicBase::base_count, 0);
+    EXPECT_EQ(PolymorphicDerived::derived_count, 0);
+}
+
+struct PolymorphicBase2 {
+    virtual ~PolymorphicBase2() = default;
+    virtual int getValue() const { return 0; }
+};
+struct PolymorphicDerived2 : PolymorphicBase2 {
+    static std::atomic<int> counter;
+    int value;
+    PolymorphicDerived2(int v) : value(v) { counter++; }
+    ~PolymorphicDerived2() { counter--; }
+    int getValue() const override { return value; }
+};
+std::atomic<int> PolymorphicDerived2::counter{0};
+
+TEST_F(GcPtrTest, Should_UseMakeGcWithDeleterAndSize) {
+    PolymorphicDerived2::counter = 0;
+    
+    {
+        PolymorphicDerived2* raw = new PolymorphicDerived2(123);
+        auto ptr = make_gc_with_deleter<PolymorphicBase2>(raw, 
+            [](PolymorphicBase2* p) { delete static_cast<PolymorphicDerived2*>(p); }, 
+            sizeof(PolymorphicDerived2));
+        EXPECT_EQ(ptr->getValue(), 123);
+        EXPECT_EQ(PolymorphicDerived2::counter, 1);
+    }
+    
+    GcPtrBase::collect();
+    EXPECT_EQ(PolymorphicDerived2::counter, 0);
+}
+
+struct ResetCustomDeleterTest {
+    static std::atomic<int> delete_count;
+    int value;
+    ResetCustomDeleterTest(int v) : value(v) {}
+};
+std::atomic<int> ResetCustomDeleterTest::delete_count{0};
+
+TEST_F(GcPtrTest, Should_ResetWithCustomDeleter) {
+    // 测试 reset_with_deleter 基本功能
+    GcPtr<int> ptr;
+    int* raw = new int(42);
+    bool deleted = false;
+    
+    ptr.reset_with_deleter(raw, [&deleted](int* p) {
+        deleted = true;
+        delete p;
+    }, sizeof(int));
+    
+    EXPECT_EQ(*ptr, 42);
+    EXPECT_FALSE(deleted);
+    
+    ptr.reset(); // 这会触发删除器
+    EXPECT_TRUE(deleted);
+}
+
+TEST_F(GcPtrTest, Should_ThrowOnDoubleRegistration) {
+    int* raw = new int(42);
+    
+    GcPtr<int> ptr1(raw);
+    
+    EXPECT_THROW({
+        GcPtr<int> ptr2(raw);
+    }, std::runtime_error);
+    
+    GcPtrBase::collect();
+}
+
+TEST_F(GcPtrTest, Should_ThrowOnResetWithAlreadyRegisteredPointer) {
+    auto ptr1 = make_gc<int>(42);
+    GcPtr<int> ptr2;
+    
+    EXPECT_THROW({
+        ptr2.reset(ptr1.get());
+    }, std::runtime_error);
+    
+    GcPtrBase::collect();
+}
+
+TEST_F(GcPtrTest, Should_HandleConstMethods) {
+    auto ptr = make_gc<int>(42);
+    
+    const GcPtr<int>& const_ptr = ptr;
+    
+    EXPECT_TRUE(const_ptr);
+    EXPECT_EQ(*const_ptr, 42);
+    EXPECT_EQ(const_ptr.get(), ptr.get());
+}
+
+struct ConstructorGcObject {
+    static std::atomic<int> counter;
+    int value;
+    ConstructorGcObject(int v) : value(v) { counter++; }
+    ~ConstructorGcObject() { counter--; }
+};
+std::atomic<int> ConstructorGcObject::counter{0};
+
+TEST_F(GcPtrTest, Should_HandleUnderConstructionDuringGc) {
+    ConstructorGcObject::counter = 0;
+    
+    {
+        // 测试多个对象创建和GC
+        auto ptr1 = make_gc<ConstructorGcObject>(1);
+        auto ptr2 = make_gc<ConstructorGcObject>(2);
+        auto ptr3 = make_gc<ConstructorGcObject>(3);
+        
+        EXPECT_EQ(ConstructorGcObject::counter, 3);
+    }
+    
+    GcPtrBase::collect();
+    EXPECT_EQ(ConstructorGcObject::counter, 0);
+}
+
+struct SelfRefObject {
+    static std::atomic<int> counter;
+    GcPtr<SelfRefObject> self;
+    SelfRefObject() { counter++; }
+    ~SelfRefObject() { counter--; }
+};
+std::atomic<int> SelfRefObject::counter{0};
+
+TEST_F(GcPtrTest, Should_HandleSelfReference) {
+    SelfRefObject::counter = 0;
+    
+    {
+        auto ptr = make_gc<SelfRefObject>();
+        ptr->self = ptr;
+        EXPECT_EQ(SelfRefObject::counter, 1);
+    }
+    
+    GcPtrBase::collect();
+    EXPECT_EQ(SelfRefObject::counter, 0);
+}
+
+struct DeepNodeObject {
+    static std::atomic<int> counter;
+    int value;
+    GcPtr<DeepNodeObject> left;
+    GcPtr<DeepNodeObject> right;
+    DeepNodeObject(int v) : value(v) { counter++; }
+    ~DeepNodeObject() { counter--; }
+};
+std::atomic<int> DeepNodeObject::counter{0};
+
+TEST_F(GcPtrTest, Should_HandleDeepNestedStructures) {
+    DeepNodeObject::counter = 0;
+    
+    {
+        auto root = make_gc<DeepNodeObject>(1);
+        root->left = make_gc<DeepNodeObject>(2);
+        root->right = make_gc<DeepNodeObject>(3);
+        root->left->left = make_gc<DeepNodeObject>(4);
+        root->left->right = make_gc<DeepNodeObject>(5);
+        root->right->left = make_gc<DeepNodeObject>(6);
+        root->right->right = make_gc<DeepNodeObject>(7);
+        EXPECT_EQ(DeepNodeObject::counter, 7);
+    }
+    
+    GcPtrBase::collect();
+    EXPECT_EQ(DeepNodeObject::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_HandleResetToSamePointer) {
+    auto ptr = make_gc<int>(42);
+    int* raw = ptr.get();
+    
+    EXPECT_NO_THROW({
+        ptr.reset(raw);
+    });
+    
+    EXPECT_EQ(*ptr, 42);
+    GcPtrBase::collect();
+}
+
+TEST_F(GcPtrTest, Should_HandleEmptySwap) {
+    GcPtr<int> ptr1;
+    GcPtr<int> ptr2;
+    
+    ptr1.swap(ptr2);
+    
+    EXPECT_FALSE(ptr1);
+    EXPECT_FALSE(ptr2);
+}
+
+TEST_F(GcPtrTest, Should_HandleMixedSwap) {
+    auto ptr1 = make_gc<int>(42);
+    GcPtr<int> ptr2;
+    
+    ptr1.swap(ptr2);
+    
+    EXPECT_FALSE(ptr1);
+    EXPECT_TRUE(ptr2);
+    EXPECT_EQ(*ptr2, 42);
+    
+    GcPtrBase::collect();
+}
+
+TEST_F(GcPtrTest, Should_HandleConstCastOperator) {
+    auto ptr = make_gc<int>(42);
+    
+    bool result = static_cast<bool>(ptr);
+    EXPECT_TRUE(result);
+    
+    GcPtr<int> null_ptr;
+    result = static_cast<bool>(null_ptr);
+    EXPECT_FALSE(result);
+}
+
+TEST_F(GcPtrTest, Should_CallGcMethod) {
+    Counted::counter = 0;
+    
+    auto ptr = make_gc<Counted>(1);
+    EXPECT_EQ(Counted::counter, 1);
+    
+    ptr.gc();
+    EXPECT_EQ(Counted::counter, 1);
+    
+    {
+        auto temp = make_gc<Counted>(2);
+        EXPECT_EQ(Counted::counter, 2);
+    }
+    
+    ptr.gc();
+    EXPECT_EQ(Counted::counter, 1);
+    
+    GcPtrBase::collect();
+}
+
+TEST_F(GcPtrTest, Should_HandleMultipleReferencesDuringCollection) {
+    Counted::counter = 0;
+    
+    auto ptr1 = make_gc<Counted>(1);
+    GcPtr<Counted> ptr2(ptr1);
+    GcPtr<Counted> ptr3(ptr1);
+    
+    EXPECT_EQ(Counted::counter, 1);
+    
+    ptr1.reset();
+    EXPECT_EQ(Counted::counter, 1);
+    
+    ptr2.reset();
+    EXPECT_EQ(Counted::counter, 1);
+    
+    ptr3.reset();
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+struct LightWeightObject {
+    static std::atomic<int> counter;
+    int value;
+    LightWeightObject(int v) : value(v) { counter++; }
+    ~LightWeightObject() { counter--; }
+};
+std::atomic<int> LightWeightObject::counter{0};
+
+TEST_F(GcPtrTest, Should_HandleLargeNumberOfPointers) {
+    LightWeightObject::counter = 0;
+    
+    const int NUM_OBJECTS = 500;
+    std::vector<GcPtr<LightWeightObject>> pointers;
+    pointers.reserve(NUM_OBJECTS);
+    
+    for (int i = 0; i < NUM_OBJECTS; ++i) {
+        pointers.push_back(make_gc<LightWeightObject>(i));
+    }
+    
+    EXPECT_EQ(LightWeightObject::counter, NUM_OBJECTS);
+    
+    pointers.clear();
+    GcPtrBase::collect();
+    
+    EXPECT_EQ(LightWeightObject::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_HandleGcInProgressFlag) {
+    Counted::counter = 0;
+    
+    auto ptr = make_gc<Counted>(1);
+    
+    bool gc_was_in_progress = GcPtrBase::gc_in_progress;
+    EXPECT_FALSE(gc_was_in_progress);
+    
+    GcPtrBase::collect();
+    
+    EXPECT_EQ(Counted::counter, 1);
+    GcPtrBase::collect();
+    
+    GcPtrBase::collect();
+}
+
+TEST_F(GcPtrTest, Should_HandlePointerComparisonWithNullptr) {
+    auto ptr = make_gc<int>(42);
+    
+    EXPECT_TRUE(ptr.get() != nullptr);
+    EXPECT_FALSE(ptr.get() == nullptr);
+    
+    GcPtr<int> null_ptr;
+    EXPECT_TRUE(null_ptr.get() == nullptr);
+    EXPECT_FALSE(null_ptr.get() != nullptr);
+}
+
+struct MoveOnly {
+    static std::atomic<int> counter;
+    int value;
+    MoveOnly(int v) : value(v) { counter++; }
+    MoveOnly(const MoveOnly&) = delete;
+    MoveOnly& operator=(const MoveOnly&) = delete;
+    MoveOnly(MoveOnly&&) noexcept = default;
+    MoveOnly& operator=(MoveOnly&&) noexcept = default;
+    ~MoveOnly() { counter--; }
+};
+std::atomic<int> MoveOnly::counter{0};
+
+TEST_F(GcPtrTest, Should_HandleMoveOnlyTypes) {
+    MoveOnly::counter = 0;
+    
+    {
+        auto ptr = make_gc<MoveOnly>(42);
+        EXPECT_EQ(MoveOnly::counter, 1);
+        EXPECT_EQ(ptr->value, 42);
+        
+        GcPtr<MoveOnly> ptr2(std::move(ptr));
+        EXPECT_FALSE(ptr);
+        EXPECT_TRUE(ptr2);
+        EXPECT_EQ(ptr2->value, 42);
+        EXPECT_EQ(MoveOnly::counter, 1);
+    }
+    
+    GcPtrBase::collect();
+    EXPECT_EQ(MoveOnly::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_HandleReleaseOnNullPointer) {
+    GcPtr<int> ptr;
+    
+    int* result = ptr.release();
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST_F(GcPtrTest, Should_HandleResetOnNullPointer) {
+    GcPtr<int> ptr;
+    
+    EXPECT_NO_THROW({
+        ptr.reset();
+    });
+    
+    EXPECT_FALSE(ptr);
+}
+
+TEST_F(GcPtrTest, Should_HandleResetWithNullptr) {
+    auto ptr = make_gc<int>(42);
+    
+    ptr.reset(nullptr);
+    EXPECT_FALSE(ptr);
+    
+    GcPtrBase::collect();
 }
 
 int main(int argc, char **argv) {

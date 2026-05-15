@@ -10,6 +10,53 @@
 - 线程安全：多线程模式下提供基本线程安全保证
 - 与 `std::shared_ptr` 兼容的 `reset()`/`release()` 接口
 
+## 重要安全规则
+
+本 GC 是一个精确的、保守风格的回收器，仅扫描每个托管对象的连续内存区域（从对象地址开始的 real_size 字节）。它通过内部 GcPtr 成员的地址落在该内存范围内来发现它们。
+
+### 禁止的行为
+
+**不要**将 GcPtr 存储在任何**非 GC 管理**的动态分配容器/对象中，包括：
+
+- `std::vector`, `std::map`, `std::unordered_map`, `std::string` 等
+- 使用 `new` 分配但**不是**通过 `make_gc`/`make_gc_with_deleter` 分配的对象
+- 全局或静态对象
+
+### 安全的使用方式
+
+GcPtr 可以安全地使用在以下位置：
+
+- 栈变量（自动成为 GC 根）
+- 其他 GC 管理对象内部（即通过 `make_gc` 分配的结构体/类）
+- GC 管理对象内存布局的直接成员
+
+### 多线程模式注意事项
+
+在多线程模式（定义 `GPTR_THREAD` 宏）下，`get()` 或 `operator->` 返回的指针仅在**不触发 GC** 的期间有效。避免在 GC 回收点（如分配新对象的函数调用或显式 `gc()` 调用）之间持有此类裸指针。
+
+### 多态对象
+
+如果 `GcPtr<Base>` 实际指向 Derived 对象，注册时必须传递正确的实际大小（`sizeof(Derived)`），否则 GC 不会扫描 Derived 部分。使用接受 `real_size` 参数的重载版本：
+
+```cpp
+GcPtr<Base> ptr(derived_raw_ptr,
+                [](Base* p){ delete static_cast<Derived*>(p); },
+                sizeof(Derived));
+```
+
+### 正确与错误的模式
+
+```cpp
+// 正确 ✅
+struct Node { GcPtr<Node> next; };
+auto node = make_gc<Node>();
+GcPtr<int> on_stack = make_gc<int>(42);
+
+// 错误 ❌
+struct Bad { std::vector<GcPtr<int>> items; };
+auto* bad = new Bad;
+```
+
 ## 使用方法
 
 ### 基本用法
