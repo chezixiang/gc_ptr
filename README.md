@@ -1,6 +1,6 @@
 # gc_ptr
 
-一个用 C++ 实现的垃圾回收智能指针库。
+一个用 C++ 实现的垃圾回收智能指针库，向标准库智能指针看齐。
 
 ## 功能特性
 
@@ -8,27 +8,33 @@
 - 循环引用处理：自动检测并回收循环引用
 - 自动触发：可配置定时回收或析构计数阈值回收
 - 线程安全：多线程模式下提供基本线程安全保证
-- 与 `std::shared_ptr` 兼容的 `reset()`/`release()` 接口
+- 与 `std::shared_ptr` 兼容的接口：`reset()`、`release()`、`swap()`
+- **容器支持**：可存储在任意标准容器中（`std::vector`、`std::set`、`std::map`、`std::unordered_set` 等）
+- **标准库兼容**：支持 `operator<`、`owner_before`、`std::hash`、`std::owner_less`
 
 ## 重要安全规则
 
 本 GC 是一个精确的、保守风格的回收器，仅扫描每个托管对象的连续内存区域（从对象地址开始的 real_size 字节）。它通过内部 GcPtr 成员的地址落在该内存范围内来发现它们。
 
-### 禁止的行为
+### 容器支持
 
-**不要**将 GcPtr 存储在任何**非 GC 管理**的动态分配容器/对象中，包括：
+**GcPtr 可以安全地存储在任何标准容器中**，无论容器本身如何分配：
 
-- `std::vector`, `std::map`, `std::unordered_map`, `std::string` 等
-- 使用 `new` 分配但**不是**通过 `make_gc`/`make_gc_with_deleter` 分配的对象
-- 全局或静态对象
+```cpp
+// ✅ 支持：栈上容器
+std::vector<GcPtr<int>> vec;
+std::set<GcPtr<int>> s;
+std::map<GcPtr<int>, std::string> m;
 
-### 安全的使用方式
+// ✅ 支持：堆上容器（裸 new）
+auto* heap_vec = new std::vector<GcPtr<int>>();
 
-GcPtr 可以安全地使用在以下位置：
-
-- 栈变量（自动成为 GC 根）
-- 其他 GC 管理对象内部（即通过 `make_gc` 分配的结构体/类）
-- GC 管理对象内存布局的直接成员
+// ✅ 支持：GC 管理的容器
+struct ContainerHolder {
+    std::vector<GcPtr<int>> items;
+};
+auto holder = make_gc<ContainerHolder>();
+```
 
 ### 多线程模式注意事项
 
@@ -42,19 +48,6 @@ GcPtr 可以安全地使用在以下位置：
 GcPtr<Base> ptr(derived_raw_ptr,
                 [](Base* p){ delete static_cast<Derived*>(p); },
                 sizeof(Derived));
-```
-
-### 正确与错误的模式
-
-```cpp
-// 正确 ✅
-struct Node { GcPtr<Node> next; };
-auto node = make_gc<Node>();
-GcPtr<int> on_stack = make_gc<int>(42);
-
-// 错误 ❌
-struct Bad { std::vector<GcPtr<int>> items; };
-auto* bad = new Bad;
 ```
 
 ## 使用方法
@@ -91,6 +84,32 @@ b->prev = a;
 // 无需手动处理，垃圾回收会自动清理
 ```
 
+### 容器使用示例
+
+```cpp
+// 栈上容器
+std::vector<GcPtr<int>> vec;
+vec.push_back(make_gc<int>(1));
+vec.push_back(make_gc<int>(2));
+
+// 有序容器（需要 operator<）
+std::set<GcPtr<int>> s;
+s.insert(make_gc<int>(42));
+
+// 关联容器
+std::map<GcPtr<int>, std::string> m;
+m[make_gc<int>(1)] = "one";
+
+// 哈希容器（需要 std::hash 特化）
+std::unordered_set<GcPtr<int>> us;
+us.insert(make_gc<int>(42));
+
+// 裸 new 分配的容器（不在 GC 管理下）
+auto* heap_vec = new std::vector<GcPtr<int>>();
+heap_vec->push_back(make_gc<int>(100));
+delete heap_vec;  // 容器销毁时，内部 GcPtr 也会正确清理
+```
+
 ## API 文档
 
 ### GcPtr\<T>
@@ -120,11 +139,18 @@ b->prev = a;
 - `T* get()` / `const T* get() const` - 获取原始指针
 - `explicit operator bool() const` - 检查是否为空
 - `void gc()` - 显式触发垃圾回收
+- `bool owner_before(const GcPtr& other) const` - 所有权比较（用于 `std::owner_less`）
 
 #### 静态成员函数
 
 - `static void set_gc_interval(std::chrono::seconds t)` - 设置定时GC间隔
 - `static void set_destruct_threshold(std::size_t n)` - 设置析构计数阈值
+
+#### 友元运算符
+
+- `bool operator==(const GcPtr& a, const GcPtr& b)` - 相等比较
+- `bool operator!=(const GcPtr& a, const GcPtr& b)` - 不等比较
+- `bool operator<(const GcPtr& a, const GcPtr& b)` - 小于比较（支持有序容器）
 
 ### GcPtrBase
 
@@ -133,6 +159,11 @@ b->prev = a;
 #### 静态公共成员函数
 
 - `static void collect()` - 执行一次垃圾回收
+
+### 标准库特化
+
+- `std::hash<GcPtr<T>>` - 哈希支持（用于 `std::unordered_set`、`std::unordered_map`）
+- `std::owner_less<GcPtr<T>>` - 所有权比较器（用于异构查找）
 
 ## 实现细节
 
