@@ -145,6 +145,7 @@ delete heap_vec;  // 容器销毁时，内部 GcPtr 也会正确清理
 
 - `static void set_gc_interval(std::chrono::seconds t)` - 设置定时GC间隔
 - `static void set_destruct_threshold(std::size_t n)` - 设置析构计数阈值
+- `static void emergency_cleanup()` - 强制触发垃圾回收，用于程序退出前清理资源
 
 #### 友元运算符
 
@@ -177,11 +178,13 @@ delete heap_vec;  // 容器销毁时，内部 GcPtr 也会正确清理
 
 ## 注意事项
 
+- **非确定性析构**：与 `std::shared_ptr` 不同，`GcPtr` 在最后一个指针析构时不会立即销毁对象。对象销毁被延迟到下一次 GC 循环。如果需要确定性资源释放，可调用 `emergency_cleanup()` 强制回收。
 - `reset()` 检查是否存在其他 `GcPtr` 指向同一对象：若仅有当前指针持有该对象，则立即销毁（保持与 `std::shared_ptr::reset()` 兼容）；若存在其他共享引用，则仅将当前指针置空，由 GC 后续回收该对象。
 - `release()` 将对象移出 GC 管理，调用者负责手动 `delete`。释放后的对象不可再交给其他 `GcPtr` 管理。
 - 多线程模式下，`collect()` 采用读写锁实现 stop‑the‑world 语义：GC 回收期间所有 `operator->` / `operator*` / `get()` 访问将阻塞，确保不会出现 use‑after‑free。持有 `operator->` 返回的裸指针跨越 GC 周期是不安全的。
-- 自定义 `deleter` 不应抛出异常；若必须抛出，对象在 deleter 调用前已从 GC 注册表中移除，保证 GC 状态一致性。
+- 自定义 `deleter` 不应抛出异常；若必须抛出，库会确保堆分配的删除器对象被正确清理后再重新抛出异常，避免内存泄漏。
 - 根检测依赖编译器和平台的对象布局，对于非标准内存布局可能存在局限。
+- **构造期间保护**：正在构造的对象（`under_construction` 状态）即使从根集合不可达也不会被回收，避免构造函数中 `this` 指针被提前销毁的灾难。
 
 ## 构建和测试
 
