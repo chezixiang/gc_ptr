@@ -163,25 +163,14 @@ public:
         node.size = sz;
         node.under_construction = under_construction;
 
-        if constexpr (std::is_convertible_v<DecayD, void (*)()>) {
-            node.invoke_deleter = [](uintptr_t ctx) {
-                reinterpret_cast<void (*)()>(ctx)();
-            };
-            node.deleter_context =
-                reinterpret_cast<uintptr_t>(static_cast<void (*)()>(d));
-            node.destroy_deleter_ctx = nullptr;
-        } else {
-            auto* heap_d = new DecayD(std::forward<Deleter>(d));
-            node.invoke_deleter = [](uintptr_t ctx) {
-                auto* ptr = reinterpret_cast<DecayD*>(ctx);
-                (*ptr)();
-                delete ptr;
-            };
-            node.deleter_context = reinterpret_cast<uintptr_t>(heap_d);
-            node.destroy_deleter_ctx = [](uintptr_t ctx) {
-                delete reinterpret_cast<DecayD*>(ctx);
-            };
-        }
+        auto* heap_d = new DecayD(std::forward<Deleter>(d));
+        node.invoke_deleter = [](uintptr_t ctx) {
+            (*reinterpret_cast<DecayD*>(ctx))();
+        };
+        node.deleter_context = reinterpret_cast<uintptr_t>(heap_d);
+        node.destroy_deleter_ctx = [](uintptr_t ctx) {
+            delete reinterpret_cast<DecayD*>(ctx);
+        };
 
         gc_objects().emplace(p, node);
         gc_ranges_dirty() = true;
@@ -479,12 +468,18 @@ private:
 
         mark_reachable_objects(queue);
 
-        std::vector<std::pair<deleter_invoke_fn, uintptr_t>> pending_deleters;
+        struct PendingDeleter {
+            deleter_invoke_fn invoke;
+            uintptr_t context;
+            deleter_invoke_fn destroy;
+        };
+        std::vector<PendingDeleter> pending_deleters;
 
         for (auto it = gc_objects().begin(); it != gc_objects().end();) {
             if (!it->second.marked && !it->second.under_construction) {
-                pending_deleters.emplace_back(it->second.invoke_deleter,
-                                              it->second.deleter_context);
+                pending_deleters.push_back({it->second.invoke_deleter,
+                                            it->second.deleter_context,
+                                            it->second.destroy_deleter_ctx});
                 it = gc_objects().erase(it);
                 gc_ranges_dirty() = true;
             } else {
@@ -492,9 +487,12 @@ private:
             }
         }
 
-        for (auto& [invoke, ctx] : pending_deleters) {
-            if (invoke) {
-                invoke(ctx);
+        for (auto& pd : pending_deleters) {
+            if (pd.invoke) {
+                pd.invoke(pd.context);
+            }
+            if (pd.destroy) {
+                pd.destroy(pd.context);
             }
         }
     }
@@ -785,10 +783,14 @@ private:
 
         auto invoke = it->second.invoke_deleter;
         auto ctx = it->second.deleter_context;
+        auto destroy = it->second.destroy_deleter_ctx;
         gc_objects().erase(it);
         gc_ranges_dirty() = true;
         if (invoke) {
             invoke(ctx);
+        }
+        if (destroy) {
+            destroy(ctx);
         }
     }
 };
