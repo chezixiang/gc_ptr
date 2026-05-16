@@ -2,6 +2,7 @@
 #define GC_PTR_HPP
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
@@ -17,9 +18,87 @@
 #include <vector>
 
 #ifdef GPTR_THREAD
-#include <atomic>
 #include <mutex>
 #include <thread>
+#endif
+
+using GcDeleterFn = void (*)(uintptr_t);
+
+struct GcNode {
+    void* address = nullptr;
+    std::size_t size = 0;
+    bool marked = false;
+    bool under_construction = true;
+    GcDeleterFn invoke_deleter = nullptr;
+    uintptr_t deleter_context = 0;
+    GcDeleterFn destroy_deleter_ctx = nullptr;
+};
+
+class GcPtrBase;
+
+struct GcContext {
+    std::map<void*, GcNode> gc_objects;
+    std::map<const void*, GcPtrBase*, std::less<const void*>> all_ptrs;
+    std::vector<std::pair<const char*, const char*>> ranges;
+    bool ranges_dirty = true;
+
+#ifdef GPTR_THREAD
+    std::recursive_mutex mutex;
+#endif
+
+    std::size_t destruct_count = 0;
+    std::size_t destruct_threshold = 40;
+    std::chrono::seconds gc_interval{120};
+    std::chrono::steady_clock::time_point last_gc_time{};
+    std::atomic<bool> time_initialized{false};
+    std::atomic<bool> auto_gc_enabled{true};
+
+    std::atomic<bool> gc_in_progress{false};
+    std::atomic<bool> gc_pending{false};
+};
+
+#ifndef GC_PTR_API
+#  if defined(_WIN32) || defined(_WIN64)
+#    ifdef GC_PTR_BUILD_DLL
+#      define GC_PTR_API __declspec(dllexport)
+#    elif defined(GC_PTR_USE_DLL)
+#      define GC_PTR_API __declspec(dllimport)
+#    else
+#      define GC_PTR_API
+#    endif
+#  else
+#    define GC_PTR_API
+#  endif
+#endif
+
+#ifdef GC_PTR_IMPLEMENTATION
+GC_PTR_API std::atomic<GcContext*> gc_active_context{nullptr};
+#else
+extern GC_PTR_API std::atomic<GcContext*> gc_active_context;
+#endif
+
+inline GcContext& gc_default_context() {
+    static GcContext ctx;
+    return ctx;
+}
+
+inline GcContext& gc_get_context() {
+    GcContext* ctx = gc_active_context.load(std::memory_order_acquire);
+    return ctx ? *ctx : gc_default_context();
+}
+
+inline void gc_set_context(GcContext* ctx) {
+    gc_active_context.store(ctx, std::memory_order_release);
+}
+
+inline void gc_reset_context() {
+    gc_active_context.store(nullptr, std::memory_order_release);
+}
+
+#ifdef GPTR_THREAD
+inline std::recursive_mutex& gc_mutex() {
+    return gc_get_context().mutex;
+}
 #endif
 
 class GcPtrBase {
@@ -39,6 +118,19 @@ protected:
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
         object_ptr = new_ptr;
+    }
+
+    struct defer_init_t {};
+    GcPtrBase(defer_init_t) {}
+
+    void do_init_base() {
+        {
+#ifdef GPTR_THREAD
+            std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
+            is_root = !is_within_any_gc_object_unsafe(this);
+        }
+        register_this();
     }
 
     bool get_is_root() const {
@@ -106,42 +198,25 @@ public:
         unregister_this();
     }
 
-    using deleter_invoke_fn = void (*)(uintptr_t);
-
-    struct GcNode {
-        void* address;
-        std::size_t size;
-        bool marked = false;
-        bool under_construction = true;
-        deleter_invoke_fn invoke_deleter = nullptr;
-        uintptr_t deleter_context = 0;
-        deleter_invoke_fn destroy_deleter_ctx = nullptr;
-    };
-
     static std::map<void*, GcNode>& gc_objects() {
-        static std::map<void*, GcNode> objects;
-        return objects;
+        return gc_get_context().gc_objects;
     }
 
     static std::map<const void*, GcPtrBase*, std::less<const void*>>& all_ptrs() {
-        static std::map<const void*, GcPtrBase*, std::less<const void*>> pointers;
-        return pointers;
+        return gc_get_context().all_ptrs;
     }
 
     static std::vector<std::pair<const char*, const char*>>& gc_ranges() {
-        static std::vector<std::pair<const char*, const char*>> ranges;
-        return ranges;
+        return gc_get_context().ranges;
     }
 
     static bool& gc_ranges_dirty() {
-        static bool dirty = true;
-        return dirty;
+        return gc_get_context().ranges_dirty;
     }
 
 #ifdef GPTR_THREAD
     static std::recursive_mutex& gc_mutex() {
-        static std::recursive_mutex mtx;
-        return mtx;
+        return ::gc_mutex();
     }
 #endif
 
@@ -166,8 +241,13 @@ public:
             delete reinterpret_cast<DecayD*>(ctx);
         };
 
-        gc_objects().emplace(p, node);
-        gc_ranges_dirty() = true;
+        try {
+            gc_objects().emplace(p, node);
+            gc_ranges_dirty() = true;
+        } catch (...) {
+            delete heap_d;
+            throw;
+        }
     }
 
     static void unregister_gc_object(void* p) {
@@ -230,23 +310,13 @@ public:
         return is_within_any_gc_object_unsafe(addr);
     }
 
-    static std::size_t destruct_count;
-    static std::size_t destruct_threshold;
-    static std::chrono::seconds gc_interval;
-    static std::chrono::steady_clock::time_point last_gc_time;
-    static bool time_initialized;
-    static bool auto_gc_enabled;
-
-#ifdef GPTR_THREAD
-    static std::atomic<bool> gc_in_progress;
-    static std::atomic<bool> gc_pending;
-#else
-    static bool gc_in_progress;
-    static bool gc_pending;
-#endif
+    static void set_context(GcContext* ctx) { gc_set_context(ctx); }
+    static void reset_context() { gc_reset_context(); }
+    [[nodiscard]] static GcContext& get_context() { return gc_get_context(); }
 
     static void check_auto_gc() {
-        if (!auto_gc_enabled)
+        auto& ctx = gc_get_context();
+        if (!ctx.auto_gc_enabled.load(std::memory_order_relaxed))
             return;
 
         bool should_collect = false;
@@ -254,15 +324,15 @@ public:
 #ifdef GPTR_THREAD
             std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-            if (!time_initialized) {
-                last_gc_time = std::chrono::steady_clock::now();
-                time_initialized = true;
+            if (!ctx.time_initialized.load(std::memory_order_relaxed)) {
+                ctx.last_gc_time = std::chrono::steady_clock::now();
+                ctx.time_initialized.store(true, std::memory_order_relaxed);
                 return;
             }
             const auto now = std::chrono::steady_clock::now();
-            if (now - last_gc_time >= gc_interval) {
+            if (now - ctx.last_gc_time >= ctx.gc_interval) {
                 should_collect = true;
-                last_gc_time = now;
+                ctx.last_gc_time = now;
             }
         }
         if (should_collect) {
@@ -271,7 +341,8 @@ public:
     }
 
     static void auto_collect_on_destruct() {
-        if (!auto_gc_enabled)
+        auto& ctx = gc_get_context();
+        if (!ctx.auto_gc_enabled.load(std::memory_order_relaxed))
             return;
 
         bool should_collect = false;
@@ -279,10 +350,10 @@ public:
 #ifdef GPTR_THREAD
             std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-            ++destruct_count;
-            if (destruct_count >= destruct_threshold) {
+            ++ctx.destruct_count;
+            if (ctx.destruct_count >= ctx.destruct_threshold) {
                 should_collect = true;
-                destruct_count = 0;
+                ctx.destruct_count = 0;
             }
         }
         if (should_collect) {
@@ -298,9 +369,10 @@ public:
             p = alloc_func();
         } catch (const std::bad_alloc&) {
 #ifdef GPTR_THREAD
-            if (gc_in_progress.load(std::memory_order_acquire)) {
-                gc_pending.store(true, std::memory_order_release);
-                while (gc_in_progress.load(std::memory_order_acquire)) {
+            auto& ctx = gc_get_context();
+            if (ctx.gc_in_progress.load(std::memory_order_acquire)) {
+                ctx.gc_pending.store(true, std::memory_order_release);
+                while (ctx.gc_in_progress.load(std::memory_order_acquire)) {
                     std::this_thread::yield();
                 }
                 try {
@@ -312,8 +384,9 @@ public:
                 return p;
             }
 #else
-            if (gc_in_progress) {
-                gc_pending = true;
+            auto& ctx = gc_get_context();
+            if (ctx.gc_in_progress.load(std::memory_order_acquire)) {
+                ctx.gc_pending.store(true, std::memory_order_release);
                 try {
                     p = alloc_func();
                     return p;
@@ -329,14 +402,9 @@ public:
     }
 
     static void run_pending_gc() {
-        bool pending = false;
-#ifdef GPTR_THREAD
-        pending = gc_pending.exchange(false, std::memory_order_acq_rel);
-#else
-        pending = gc_pending;
-        gc_pending = false;
-#endif
-        if (pending && !gc_in_progress) {
+        auto& ctx = gc_get_context();
+        bool pending = ctx.gc_pending.exchange(false, std::memory_order_acq_rel);
+        if (pending && !ctx.gc_in_progress.load(std::memory_order_acquire)) {
             collect();
         }
     }
@@ -396,35 +464,22 @@ public:
 
 public:
     static void collect() {
+        auto& ctx = gc_get_context();
+        if (ctx.gc_in_progress.exchange(true, std::memory_order_acq_rel))
+            return;
 #ifdef GPTR_THREAD
-        if (gc_in_progress.exchange(true, std::memory_order_acq_rel))
-            return;
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
-
-        try {
-            collect_core();
-        } catch (...) {
-            gc_in_progress.store(false, std::memory_order_release);
-            throw;
-        }
-
-        gc_in_progress.store(false, std::memory_order_release);
-        run_pending_gc();
-#else
-        if (gc_in_progress)
-            return;
-        gc_in_progress = true;
-
-        try {
-            collect_core();
-        } catch (...) {
-            gc_in_progress = false;
-            throw;
-        }
-
-        gc_in_progress = false;
-        run_pending_gc();
 #endif
+
+        try {
+            collect_core();
+        } catch (...) {
+            ctx.gc_in_progress.store(false, std::memory_order_release);
+            throw;
+        }
+
+        ctx.gc_in_progress.store(false, std::memory_order_release);
+        run_pending_gc();
     }
 
     static void emergency_cleanup() {
@@ -432,39 +487,44 @@ public:
     }
 
     static void set_gc_interval(std::chrono::seconds interval) {
+        auto& ctx = gc_get_context();
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-        gc_interval = interval;
-        time_initialized = false;
+        ctx.gc_interval = interval;
+        ctx.time_initialized.store(false, std::memory_order_relaxed);
     }
 
     static void set_destruct_threshold(std::size_t threshold) {
+        auto& ctx = gc_get_context();
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-        destruct_threshold = threshold;
+        ctx.destruct_threshold = threshold;
     }
 
     static void disable_auto_gc() {
+        auto& ctx = gc_get_context();
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-        auto_gc_enabled = false;
+        ctx.auto_gc_enabled.store(false, std::memory_order_relaxed);
     }
 
     static void enable_auto_gc() {
+        auto& ctx = gc_get_context();
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-        auto_gc_enabled = true;
+        ctx.auto_gc_enabled.store(true, std::memory_order_relaxed);
     }
 
     [[nodiscard]] static bool is_auto_gc_enabled() {
+        auto& ctx = gc_get_context();
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-        return auto_gc_enabled;
+        return ctx.auto_gc_enabled.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] static std::size_t gc_object_count() {
@@ -474,30 +534,28 @@ public:
         return gc_objects().size();
     }
 
-    // Test helper: check if GC is in progress
+#ifdef GC_PTR_EXPOSE_INTERNALS
     [[nodiscard]] static bool is_gc_in_progress() {
-#ifdef GPTR_THREAD
-        return gc_in_progress.load(std::memory_order_acquire);
-#else
-        return gc_in_progress;
-#endif
+        auto& ctx = gc_get_context();
+        return ctx.gc_in_progress.load(std::memory_order_acquire);
     }
 
-    // Test helper: get destruct count
     [[nodiscard]] static std::size_t get_destruct_count() {
+        auto& ctx = gc_get_context();
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-        return destruct_count;
+        return ctx.destruct_count;
     }
 
-    // Test helper: reset destruct count
     static void reset_destruct_count() {
+        auto& ctx = gc_get_context();
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-        destruct_count = 0;
+        ctx.destruct_count = 0;
     }
+#endif
 
 private:
     static void collect_core() {
@@ -522,9 +580,9 @@ private:
         };
 
         struct PendingDeleter {
-            deleter_invoke_fn invoke;
+            GcDeleterFn invoke;
             uintptr_t context;
-            deleter_invoke_fn destroy;
+            GcDeleterFn destroy;
         };
         std::vector<PendingDeleter> pending_deleters;
         std::vector<GarbageInfo> garbage_objects;
@@ -595,21 +653,6 @@ private:
     }
 };
 
-inline std::size_t GcPtrBase::destruct_count = 0;
-inline std::size_t GcPtrBase::destruct_threshold = 40;
-inline std::chrono::seconds GcPtrBase::gc_interval(120);
-inline std::chrono::steady_clock::time_point GcPtrBase::last_gc_time{};
-inline bool GcPtrBase::time_initialized = false;
-inline bool GcPtrBase::auto_gc_enabled = true;
-
-#ifdef GPTR_THREAD
-inline std::atomic<bool> GcPtrBase::gc_in_progress{false};
-inline std::atomic<bool> GcPtrBase::gc_pending{false};
-#else
-inline bool GcPtrBase::gc_in_progress = false;
-inline bool GcPtrBase::gc_pending = false;
-#endif
-
 template <typename T>
 class GcPtr : private GcPtrBase {
 public:
@@ -625,12 +668,17 @@ public:
 #ifdef GPTR_THREAD
             std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
-            gc_objects().emplace(ptr, GcNode{ptr, sizeof(T), false, true,
-                                             [](uintptr_t ctx) {
-                                                 delete reinterpret_cast<T*>(ctx);
-                                             },
-                                             reinterpret_cast<uintptr_t>(ptr), nullptr});
-            gc_ranges_dirty() = true;
+            try {
+                gc_objects().emplace(ptr, GcNode{ptr, sizeof(T), false, true,
+                                                 [](uintptr_t ctx) {
+                                                     delete reinterpret_cast<T*>(ctx);
+                                                 },
+                                                 reinterpret_cast<uintptr_t>(ptr), nullptr});
+                gc_ranges_dirty() = true;
+            } catch (...) {
+                operator delete(ptr);
+                throw;
+            }
         }
 
         try {
@@ -682,20 +730,24 @@ public:
     explicit GcPtr(T* p)
         : GcPtr(p, [](T* ptr) { delete ptr; }, sizeof(T)) {}
 
-    GcPtr(const GcPtr& other) : GcPtrBase(other) {
+    GcPtr(const GcPtr& other) : GcPtrBase(defer_init_t{}) {
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
+        do_init_base();
         set_object_ptr(other.get_object_ptr());
+        check_auto_gc();
     }
 
-    GcPtr(GcPtr&& other) noexcept : GcPtrBase(std::move(other)) {
+    GcPtr(GcPtr&& other) noexcept : GcPtrBase(defer_init_t{}) {
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
+        do_init_base();
         void* ptr = other.get_object_ptr();
         set_object_ptr(ptr);
         other.set_object_ptr(nullptr);
+        check_auto_gc();
     }
 
     GcPtr& operator=(const GcPtr& other) {
@@ -839,6 +891,8 @@ public:
     [[nodiscard]] static std::size_t gc_object_count() {
         return GcPtrBase::gc_object_count();
     }
+    static void set_context(GcContext* ctx) { GcPtrBase::set_context(ctx); }
+    static void reset_context() { GcPtrBase::reset_context(); }
 
     friend bool operator==(const GcPtr& a, const GcPtr& b) {
         return a.get_object_ptr() == b.get_object_ptr();
@@ -950,7 +1004,9 @@ struct atomic<GcPtr<T>> {
 
     value_type load(std::memory_order order = std::memory_order_seq_cst) const {
         (void)order;
-        std::lock_guard<std::recursive_mutex> lock(GcPtrBase::gc_mutex());
+#ifdef GPTR_THREAD
+        std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
         return ptr;
     }
 
@@ -961,8 +1017,11 @@ struct atomic<GcPtr<T>> {
     void store(value_type desired,
                std::memory_order order = std::memory_order_seq_cst) noexcept {
         (void)order;
-        std::lock_guard<std::recursive_mutex> lock(GcPtrBase::gc_mutex());
-        ptr = std::move(desired);
+#ifdef GPTR_THREAD
+        std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
+        ptr.set_object_ptr(desired.get_object_ptr());
+        desired.set_object_ptr(nullptr);
     }
 
     value_type operator=(value_type desired) noexcept {
@@ -974,9 +1033,13 @@ struct atomic<GcPtr<T>> {
                         std::memory_order order =
                             std::memory_order_seq_cst) noexcept {
         (void)order;
-        std::lock_guard<std::recursive_mutex> lock(GcPtrBase::gc_mutex());
-        value_type old = ptr;
-        ptr = std::move(desired);
+#ifdef GPTR_THREAD
+        std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
+        value_type old;
+        old.set_object_ptr(ptr.get_object_ptr());
+        ptr.set_object_ptr(desired.get_object_ptr());
+        desired.set_object_ptr(nullptr);
         return old;
     }
 
@@ -986,12 +1049,15 @@ struct atomic<GcPtr<T>> {
         std::memory_order failure = std::memory_order_seq_cst) noexcept {
         (void)success;
         (void)failure;
-        std::lock_guard<std::recursive_mutex> lock(GcPtrBase::gc_mutex());
+#ifdef GPTR_THREAD
+        std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
         if (ptr == expected) {
-            ptr = std::move(desired);
+            ptr.set_object_ptr(desired.get_object_ptr());
+            desired.set_object_ptr(nullptr);
             return true;
         }
-        expected = ptr;
+        expected.set_object_ptr(ptr.get_object_ptr());
         return false;
     }
 

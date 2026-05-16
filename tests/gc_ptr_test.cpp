@@ -8,6 +8,8 @@
 #ifdef GPTR_THREAD
 #include <thread>
 #endif
+#define GC_PTR_EXPOSE_INTERNALS
+#define GC_PTR_IMPLEMENTATION
 #include "../gc_ptr.hpp"
 
 namespace {
@@ -828,7 +830,7 @@ TEST_F(GcPtrTest, Should_HandleGcInProgressFlag) {
     
     auto ptr = make_gc<Counted>(1);
     
-    bool gc_was_in_progress = GcPtrBase::gc_in_progress;
+    bool gc_was_in_progress = GcPtrBase::is_gc_in_progress();
     EXPECT_FALSE(gc_was_in_progress);
     
     GcPtrBase::collect();
@@ -1549,6 +1551,316 @@ TEST_F(GcPtrTest, Collect_ExceptionSafety_GcInProgressReset) {
     
     // 第二次 collect 应该能正常执行
     EXPECT_NO_THROW(GcPtrBase::collect());
+}
+
+#ifdef GPTR_THREAD
+
+TEST_F(GcPtrTest, Should_AvoidRace_DuringCopyConstructionUnderConcurrentGc) {
+    Counted::counter = 0;
+    auto shared = make_gc<Counted>(1);
+    EXPECT_EQ(Counted::counter, 1);
+
+    std::atomic<bool> start{false};
+    std::atomic<unsigned> copy_count{0};
+    std::atomic<bool> error{false};
+
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int j = 0; j < 5000; ++j) {
+                GcPtr<Counted> copy(shared);
+                if (!copy || copy.get() != shared.get()) {
+                    error.store(true, std::memory_order_release);
+                }
+                copy_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    std::thread gc_thread([&] {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 500; ++i) {
+            GcPtrBase::collect();
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+
+    for (auto& t : threads) t.join();
+    gc_thread.join();
+
+    EXPECT_FALSE(error.load());
+    EXPECT_GE(copy_count.load(), 4u * 5000u);
+
+    shared.reset();
+    GcPtrBase::collect();
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_AvoidRace_DuringMoveConstructionUnderConcurrentGc) {
+    std::atomic<unsigned> total_ops{0};
+    std::atomic<bool> error{false};
+    std::atomic<bool> start{false};
+
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int j = 0; j < 5000; ++j) {
+                auto src = make_gc<int>(j);
+                GcPtr<int> dst(std::move(src));
+                if (src || !dst || *dst != j) {
+                    error.store(true, std::memory_order_release);
+                }
+                total_ops.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    std::thread gc_thread([&] {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 500; ++i) {
+            GcPtrBase::collect();
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+
+    for (auto& t : threads) t.join();
+    gc_thread.join();
+
+    EXPECT_FALSE(error.load());
+    EXPECT_GE(total_ops.load(), 4u * 5000u);
+
+    GcPtrBase::collect();
+}
+
+TEST_F(GcPtrTest, Should_HandleExtendedConcurrencyStress) {
+    std::atomic<long long> total_allocations{0};
+    std::atomic<bool> error{false};
+    std::atomic<bool> stop{false};
+
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back([&, tid = i] {
+            while (!stop.load(std::memory_order_acquire)) {
+                auto ptr = make_gc<int>(tid * 10000
+                                        + static_cast<int>(total_allocations.load()));
+                GcPtr<int> copy(ptr);
+                GcPtr<int> moved(std::move(copy));
+                GcPtr<int> assigned;
+                assigned = moved;
+                if (!assigned) {
+                    error.store(true, std::memory_order_release);
+                }
+                total_allocations.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    std::thread gc_thread([&] {
+        while (!stop.load(std::memory_order_acquire)) {
+            GcPtrBase::collect();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::seconds(60));
+    stop.store(true, std::memory_order_release);
+
+    for (auto& t : threads) t.join();
+    gc_thread.join();
+
+    EXPECT_FALSE(error.load());
+    EXPECT_GT(total_allocations.load(), 1000LL);
+
+    GcPtrBase::collect();
+}
+
+#endif // GPTR_THREAD
+
+TEST_F(GcPtrTest, Should_HandleMultipleThrowingDeletersInCollect) {
+    struct Obj { int id; };
+    std::atomic<int> delete_count{0};
+    int throw_idx = 1;
+
+    auto* raw1 = new Obj{0};
+    auto* raw2 = new Obj{1};
+    {
+        GcPtr<Obj> ptr1(raw1, [&delete_count, throw_idx](Obj* p) {
+            delete_count++;
+            int saved_id = p->id;
+            delete p;
+            if (saved_id == throw_idx)
+                throw std::runtime_error("deleter exception");
+        });
+        GcPtr<Obj> ptr2(raw2, [&delete_count, throw_idx](Obj* p) {
+            delete_count++;
+            int saved_id = p->id;
+            delete p;
+            if (saved_id == throw_idx)
+                throw std::runtime_error("deleter exception");
+        });
+    }
+
+    EXPECT_THROW(GcPtrBase::collect(), std::runtime_error);
+
+    EXPECT_EQ(delete_count, 2);
+
+    EXPECT_FALSE(GcPtrBase::is_gc_in_progress());
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
+}
+
+TEST_F(GcPtrTest, Should_AccuratelyTriggerAutoGcByDestructThreshold) {
+    Counted::counter = 0;
+    GcPtr<int>::disable_auto_gc();
+    GcPtrBase::collect();
+    GcPtrBase::reset_destruct_count();
+
+    GcPtr<int>::set_destruct_threshold(1);
+    GcPtr<int>::enable_auto_gc();
+
+    {
+        auto p1 = make_gc<Counted>(1);
+        EXPECT_EQ(Counted::counter, 1);
+    }
+
+    GcPtr<int>::set_destruct_threshold(1000);
+    GcPtrBase::collect();
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_HandleStaticDeleterChainInGcCollect) {
+    std::atomic<int> step{0};
+
+    struct ChainObj { int id; };
+
+    auto* raw1 = new ChainObj{1};
+    auto* raw2 = new ChainObj{2};
+    auto* raw3 = new ChainObj{3};
+
+    {
+        GcPtr<ChainObj> p1(raw1, [&step](ChainObj* p) { step++; delete p; });
+        GcPtr<ChainObj> p2(raw2, [&step](ChainObj* p) { step++; delete p; });
+        GcPtr<ChainObj> p3(raw3, [&step](ChainObj* p) { step++; delete p; });
+    }
+
+    EXPECT_NO_THROW(GcPtrBase::collect());
+    EXPECT_EQ(step, 3);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
+}
+
+TEST_F(GcPtrTest, Should_PreserveExpectedObjectWhenCompareExchangeFails) {
+    Counted::counter = 0;
+    std::atomic<GcPtr<Counted>> atomic_ptr;
+
+    auto shared_obj = make_gc<Counted>(42);
+    auto expected = make_gc<Counted>(99);
+    EXPECT_EQ(Counted::counter, 2);
+
+    GcPtr<Counted> expected_alias = expected;
+    EXPECT_EQ(Counted::counter, 2);
+
+    atomic_ptr.store(shared_obj);
+
+    GcPtr<Counted> another_obj = make_gc<Counted>(77);
+    EXPECT_EQ(Counted::counter, 3);
+
+    bool success = atomic_ptr.compare_exchange_strong(expected, another_obj);
+    EXPECT_FALSE(success);
+    EXPECT_EQ(expected->value, 42);
+
+    EXPECT_EQ(Counted::counter, 3);
+
+    EXPECT_EQ(expected_alias->value, 99);
+
+    atomic_ptr.store(GcPtr<Counted>());
+    expected.reset();
+    expected_alias.reset();
+    shared_obj.reset();
+    another_obj.reset();
+    GcPtrBase::collect();
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_NotDestroyLastReferenceWhenCompareExchangeFails) {
+    Counted::counter = 0;
+
+    auto keep_alive = make_gc<Counted>(1);
+    EXPECT_EQ(Counted::counter, 1);
+
+    {
+        std::atomic<GcPtr<Counted>> atomic_ptr;
+        auto expected = keep_alive;
+        EXPECT_EQ(Counted::counter, 1);
+
+        atomic_ptr.store(make_gc<Counted>(2));
+        EXPECT_EQ(Counted::counter, 2);
+
+        GcPtr<Counted> desired = make_gc<Counted>(3);
+        EXPECT_EQ(Counted::counter, 3);
+
+        bool success =
+            atomic_ptr.compare_exchange_weak(expected, desired);
+        EXPECT_FALSE(success);
+
+        EXPECT_EQ(expected->value, 2);
+
+        EXPECT_EQ(Counted::counter, 3);
+        EXPECT_TRUE(keep_alive);
+        EXPECT_EQ(keep_alive->value, 1);
+
+        atomic_ptr.store(GcPtr<Counted>());
+        expected.reset();
+        desired.reset();
+        GcPtrBase::collect();
+        EXPECT_EQ(Counted::counter, 1);
+    }
+
+    EXPECT_EQ(Counted::counter, 1);
+    EXPECT_TRUE(keep_alive);
+
+    keep_alive.reset();
+    GcPtrBase::collect();
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_HandleCompareExchangeWeakSuccessPath) {
+    Counted::counter = 0;
+
+    std::atomic<GcPtr<Counted>> atomic_ptr;
+    auto expected = make_gc<Counted>(10);
+    auto desired = make_gc<Counted>(20);
+    EXPECT_EQ(Counted::counter, 2);
+
+    atomic_ptr.store(expected);
+
+    bool success =
+        atomic_ptr.compare_exchange_weak(expected, desired);
+    EXPECT_TRUE(success);
+    EXPECT_EQ(Counted::counter, 2);
+
+    auto loaded = atomic_ptr.load();
+    EXPECT_EQ(loaded->value, 20);
+
+    atomic_ptr.store(GcPtr<Counted>());
+    expected.reset();
+    desired.reset();
+    loaded.reset();
+    GcPtrBase::collect();
+    EXPECT_EQ(Counted::counter, 0);
 }
 
 int main(int argc, char **argv) {
