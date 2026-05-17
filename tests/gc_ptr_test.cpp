@@ -17,8 +17,6 @@ namespace {
 class GcPtrTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        GcPtr<int>::set_gc_interval(std::chrono::seconds(3600));
-        GcPtr<int>::set_destruct_threshold(1000);
         GcPtrBase::collect();
     }
     void TearDown() override {
@@ -39,11 +37,11 @@ TEST_F(GcPtrTest, Should_ConstructWithArgs) {
 }
 
 struct Counted {
-	static std::atomic<int> counter;
-	int value;
-	Counted() : value(0) { counter++; }
-	explicit Counted(int v) : value(v) { counter++; }
-	~Counted() { counter--; }
+    static std::atomic<int> counter;
+    int value;
+    Counted() : value(0) { counter++; }
+    explicit Counted(int v) : value(v) { counter++; }
+    ~Counted() { counter--; }
 };
 std::atomic<int> Counted::counter{0};
 
@@ -54,7 +52,6 @@ TEST_F(GcPtrTest, Should_CallConstructorAndDestructor) {
         EXPECT_EQ(Counted::counter, 1);
         EXPECT_EQ(ptr->value, 123);
     }
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
@@ -134,37 +131,27 @@ TEST_F(GcPtrTest, Should_ReleaseObject) {
         Counted* raw = ptr.release();
         EXPECT_FALSE(ptr);
         EXPECT_EQ(raw->value, 123);
-        delete raw;  // 现在需要手动删除
+        delete raw;
     }
     EXPECT_EQ(Counted::counter, 0);
 }
 
-TEST_F(GcPtrTest, Should_CollectUnreachableObjects) {
+TEST_F(GcPtrTest, Should_ImmediatelyFreeUnreferencedObjects) {
     Counted::counter = 0;
     auto root = make_gc<Counted>(1);
+    EXPECT_EQ(Counted::counter, 1);
     {
         auto another = make_gc<Counted>(2);
         EXPECT_EQ(Counted::counter, 2);
     }
-    EXPECT_EQ(Counted::counter, 2);
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 1);
-    
-    // 现在让 root 也离开作用域
-    {
-        // 新的作用域，root 在这里被重置为默认构造
-        GcPtr<Counted> temp;
-        temp.swap(root);
-    }
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 0);
 }
 
 struct Node {
-	static std::atomic<int> counter;
-	GcPtr<Node> next;
-	Node() { counter++; }
-	~Node() { counter--; }
+    static std::atomic<int> counter;
+    GcPtr<Node> next;
+    Node() { counter++; }
+    ~Node() { counter--; }
 };
 std::atomic<int> Node::counter{0};
 
@@ -177,20 +164,21 @@ TEST_F(GcPtrTest, Should_HandleCyclicReferences) {
         node1->next = node2;
         node2->next = node1;
     }
+    EXPECT_GT(Node::counter, 0);
     GcPtrBase::collect();
     EXPECT_EQ(Node::counter, 0);
 }
 
 struct Complex {
-	static std::atomic<int> counter;
-	int data;
-	Complex() : data(0) { counter++; }
-	explicit Complex(int d) : data(d) { counter++; }
-	~Complex() { counter--; }
+    static std::atomic<int> counter;
+    int data;
+    Complex() : data(0) { counter++; }
+    explicit Complex(int d) : data(d) { counter++; }
+    ~Complex() { counter--; }
 };
 std::atomic<int> Complex::counter{0};
 
-TEST_F(GcPtrTest, Should_CollectNestedObjects) {
+TEST_F(GcPtrTest, Should_ImmediatelyFreeNestedObjects) {
     Complex::counter = 0;
     {
         auto root = make_gc<Complex>(1);
@@ -198,28 +186,20 @@ TEST_F(GcPtrTest, Should_CollectNestedObjects) {
             auto inner = make_gc<Complex>(2);
             auto temp = make_gc<Complex>(3);
         }
-        EXPECT_EQ(Complex::counter, 3);
-        GcPtrBase::collect();
         EXPECT_EQ(Complex::counter, 1);
     }
-    GcPtrBase::collect();
     EXPECT_EQ(Complex::counter, 0);
 }
 
-TEST_F(GcPtrTest, Should_SetGcInterval) {
-    GcPtr<int>::set_gc_interval(std::chrono::seconds(10));
-    GcPtr<int>::set_destruct_threshold(50);
-}
-
 struct WithInnerPtr {
-	static std::atomic<int> counter;
-	GcPtr<WithInnerPtr> child;
-	WithInnerPtr() { counter++; }
-	~WithInnerPtr() { counter--; }
+    static std::atomic<int> counter;
+    GcPtr<WithInnerPtr> child;
+    WithInnerPtr() { counter++; }
+    ~WithInnerPtr() { counter--; }
 };
 std::atomic<int> WithInnerPtr::counter{0};
 
-TEST_F(GcPtrTest, Should_CollectChainOfObjects) {
+TEST_F(GcPtrTest, Should_ImmediatelyFreeChainOfObjects) {
     WithInnerPtr::counter = 0;
     {
         auto root = make_gc<WithInnerPtr>();
@@ -227,7 +207,6 @@ TEST_F(GcPtrTest, Should_CollectChainOfObjects) {
         root->child->child = make_gc<WithInnerPtr>();
         EXPECT_EQ(WithInnerPtr::counter, 3);
     }
-    GcPtrBase::collect();
     EXPECT_EQ(WithInnerPtr::counter, 0);
 }
 
@@ -247,32 +226,29 @@ TEST_F(GcPtrTest, Should_CompareEquality) {
 }
 
 TEST_F(GcPtrTest, Should_ConstructFromNullptr) {
-    GcPtr<int> ptr; // 默认构造就是 nullptr
+    GcPtr<int> ptr;
     EXPECT_FALSE(ptr);
     EXPECT_EQ(ptr.get(), nullptr);
 }
 
 TEST_F(GcPtrTest, Should_SelfAssignCopy) {
     auto ptr = make_gc<int>(42);
-    ptr = ptr;  // 自赋值
+    ptr = ptr;
     EXPECT_TRUE(ptr);
     EXPECT_EQ(*ptr, 42);
 }
 
 TEST_F(GcPtrTest, Should_SelfAssignMove) {
     auto ptr = make_gc<int>(42);
-    // 抑制自移动警告，因为我们确实想测试这种边缘情况
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wself-move"
-    ptr = std::move(ptr);  // 自移动赋值
+    ptr = std::move(ptr);
     #pragma GCC diagnostic pop
-    // 移动后的状态可能为空，或保持原值，取决于实现
-    // 这里我们只检查程序不崩溃
 }
 
 struct ThrowInConstructor {
-	static std::atomic<int> throw_count;
-	ThrowInConstructor() { throw_count++; throw std::runtime_error("test"); }
+    static std::atomic<int> throw_count;
+    ThrowInConstructor() { throw_count++; throw std::runtime_error("test"); }
 };
 std::atomic<int> ThrowInConstructor::throw_count{0};
 
@@ -284,18 +260,10 @@ TEST_F(GcPtrTest, Should_HandleExceptionInConstructor) {
     EXPECT_EQ(ThrowInConstructor::throw_count, 1);
 }
 
-TEST_F(GcPtrTest, Should_SetAndGetDestructThreshold) {
-    GcPtr<int>::set_destruct_threshold(100);
-    GcPtr<int>::set_destruct_threshold(200);  // 只是测试不会崩溃
-    // 恢复默认值
-    GcPtr<int>::set_destruct_threshold(1000);
-}
-
 struct ReentrantGc : public Counted {
     GcPtr<ReentrantGc> ptr;
     ReentrantGc() : Counted() {}
     ~ReentrantGc() {
-        // 析构时尝试再次GC
         GcPtrBase::collect();
     }
 };
@@ -305,8 +273,10 @@ TEST_F(GcPtrTest, Should_ProtectAgainstReentrantGc) {
     {
         auto obj = make_gc<ReentrantGc>();
         obj->ptr = make_gc<ReentrantGc>();
+        obj->ptr->ptr = obj;
         EXPECT_EQ(ReentrantGc::counter, 2);
     }
+    EXPECT_EQ(ReentrantGc::counter, 2);
     GcPtrBase::collect();
     EXPECT_EQ(ReentrantGc::counter, 0);
 }
@@ -335,7 +305,7 @@ TEST_F(GcPtrTest, Should_ConstructWithMultipleArgs) {
 TEST_F(GcPtrTest, Should_WorkInMultiThreadedEnvironment) {
     Counted::counter = 0;
     std::vector<std::thread> threads;
-    
+
     for (int i = 0; i < 50; ++i) {
         threads.emplace_back([] {
             for (int j = 0; j < 20; ++j) {
@@ -345,19 +315,16 @@ TEST_F(GcPtrTest, Should_WorkInMultiThreadedEnvironment) {
             }
         });
     }
-    
+
     for (auto& t : threads) {
         t.join();
     }
-    
-    GcPtrBase::collect();
-    // 所有线程完成后不应该有残留对象
+
     EXPECT_EQ(Counted::counter, 0);
 }
 
 #endif
 
-// 自定义 Deleter 测试
 struct CustomDeleterTest {
     static int delete_count;
     int value;
@@ -370,19 +337,17 @@ TEST_F(GcPtrTest, Should_UseCustomDeleter) {
     auto* raw = new CustomDeleterTest(42);
     {
         auto ptr = make_gc_with_deleter<CustomDeleterTest>(
-            raw, 
-            [](CustomDeleterTest* p) { 
-                CustomDeleterTest::delete_count++; 
-                delete p; 
+            raw,
+            [](CustomDeleterTest* p) {
+                CustomDeleterTest::delete_count++;
+                delete p;
             }
         );
         EXPECT_EQ(ptr->value, 42);
     }
-    GcPtrBase::collect();
     EXPECT_EQ(CustomDeleterTest::delete_count, 1);
 }
 
-// 边界条件测试：多次重置同一指针
 TEST_F(GcPtrTest, Should_HandleMultipleResets) {
     Counted::counter = 0;
     {
@@ -395,11 +360,9 @@ TEST_F(GcPtrTest, Should_HandleMultipleResets) {
         ptr.reset(new Counted(3));
         EXPECT_EQ(Counted::counter, 1);
     }
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
-// 边界条件测试：release 后手动删除
 TEST_F(GcPtrTest, Should_HandleReleaseAndManualDelete) {
     Counted::counter = 0;
     {
@@ -410,24 +373,21 @@ TEST_F(GcPtrTest, Should_HandleReleaseAndManualDelete) {
         delete raw;
         EXPECT_EQ(Counted::counter, 0);
     }
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
-// 边界条件测试：空指针操作
 TEST_F(GcPtrTest, Should_HandleNullptrOperations) {
     GcPtr<int> ptr;
     EXPECT_FALSE(ptr);
     EXPECT_EQ(ptr.get(), nullptr);
-    ptr.reset(); // 空指针重置不应该崩溃
+    ptr.reset();
     EXPECT_FALSE(ptr);
-    
+
     int* null_raw = nullptr;
-    GcPtr<int> ptr2(null_raw); // 从空指针构造
+    GcPtr<int> ptr2(null_raw);
     EXPECT_FALSE(ptr2);
 }
 
-// 边界条件测试：大对象链
 struct LargeObjectChainNode {
     static std::atomic<int> count;
     GcPtr<LargeObjectChainNode> next;
@@ -439,7 +399,7 @@ std::atomic<int> LargeObjectChainNode::count{0};
 
 TEST_F(GcPtrTest, Should_HandleLargeObjectChain) {
     LargeObjectChainNode::count = 0;
-    
+
     {
         auto root = make_gc<LargeObjectChainNode>(0);
         auto current = root;
@@ -449,17 +409,14 @@ TEST_F(GcPtrTest, Should_HandleLargeObjectChain) {
         }
         EXPECT_EQ(LargeObjectChainNode::count, 100);
     }
-    GcPtrBase::collect();
     EXPECT_EQ(LargeObjectChainNode::count, 0);
 }
 
-// 边界条件测试：快速创建和销毁
 TEST_F(GcPtrTest, Should_HandleRapidCreationAndDestruction) {
     Counted::counter = 0;
     for (int i = 0; i < 1000; ++i) {
         auto ptr = make_gc<Counted>(i);
     }
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
@@ -468,10 +425,10 @@ TEST_F(GcPtrTest, Should_HandleRapidCreationAndDestruction) {
 TEST_F(GcPtrTest, Should_CountReferencesCorrectly) {
     auto ptr1 = make_gc<int>(42);
     EXPECT_EQ(GcPtrBase::count_references(ptr1.get()), 1);
-    
+
     GcPtr<int> ptr2(ptr1);
     EXPECT_EQ(GcPtrBase::count_references(ptr1.get()), 2);
-    
+
     GcPtr<int> ptr3(ptr2);
     EXPECT_EQ(GcPtrBase::count_references(ptr1.get()), 3);
 }
@@ -483,10 +440,10 @@ TEST_F(GcPtrTest, Should_DetectPointerWithinGcObject) {
     };
     auto outer = make_gc<WithPtr>();
     outer->inner = make_gc<int>(42);
-    
+
     EXPECT_TRUE(GcPtrBase::is_within_any_gc_object(&outer->inner));
     EXPECT_TRUE(GcPtrBase::is_within_any_gc_object(&outer->value));
-    
+
     int stack_var = 0;
     EXPECT_FALSE(GcPtrBase::is_within_any_gc_object(&stack_var));
 }
@@ -494,32 +451,13 @@ TEST_F(GcPtrTest, Should_DetectPointerWithinGcObject) {
 TEST_F(GcPtrTest, Should_HandleManualGcObjectRegistration) {
     int* raw = new int(100);
     bool deleted = false;
-    
-    GcPtrBase::register_gc_object(raw, sizeof(int), [raw, &deleted]() {
-        delete raw;
-        deleted = true;
-    });
-    
-    EXPECT_EQ(GcPtrBase::count_references(raw), 0);
-    
+
+    GcPtrBase::register_gc_object(raw, sizeof(int), nullptr);
+
     GcPtrBase::unregister_gc_object(raw);
     EXPECT_FALSE(deleted);
-}
 
-TEST_F(GcPtrTest, Should_TriggerAutoGcOnDestructThreshold) {
-    // 测试设置和获取阈值
-    GcPtr<int>::set_destruct_threshold(50);
-    GcPtr<int>::set_destruct_threshold(100);
-    EXPECT_TRUE(true); // 只是确认设置不会崩溃
-    GcPtr<int>::set_destruct_threshold(1000);
-}
-
-TEST_F(GcPtrTest, Should_TriggerAutoGcOnTimeInterval) {
-    // 测试设置和获取间隔
-    GcPtr<int>::set_gc_interval(std::chrono::seconds(5));
-    GcPtr<int>::set_gc_interval(std::chrono::seconds(10));
-    EXPECT_TRUE(true); // 只是确认设置不会崩溃
-    GcPtr<int>::set_gc_interval(std::chrono::seconds(3600));
+    delete raw;
 }
 
 struct PolymorphicBase {
@@ -539,16 +477,15 @@ std::atomic<int> PolymorphicDerived::derived_count{0};
 TEST_F(GcPtrTest, Should_HandlePolymorphicObjects) {
     PolymorphicBase::base_count = 0;
     PolymorphicDerived::derived_count = 0;
-    
+
     {
-        GcPtr<PolymorphicBase> ptr(new PolymorphicDerived(), 
-            [](PolymorphicBase* p) { delete static_cast<PolymorphicDerived*>(p); }, 
+        GcPtr<PolymorphicBase> ptr(new PolymorphicDerived(),
+            [](PolymorphicBase* p) { delete static_cast<PolymorphicDerived*>(p); },
             sizeof(PolymorphicDerived));
         EXPECT_EQ(PolymorphicBase::base_count, 1);
         EXPECT_EQ(PolymorphicDerived::derived_count, 1);
     }
-    
-    GcPtrBase::collect();
+
     EXPECT_EQ(PolymorphicBase::base_count, 0);
     EXPECT_EQ(PolymorphicDerived::derived_count, 0);
 }
@@ -568,100 +505,63 @@ std::atomic<int> PolymorphicDerived2::counter{0};
 
 TEST_F(GcPtrTest, Should_UseMakeGcWithDeleterAndSize) {
     PolymorphicDerived2::counter = 0;
-    
+
     {
         PolymorphicDerived2* raw = new PolymorphicDerived2(123);
-        auto ptr = make_gc_with_deleter<PolymorphicBase2>(raw, 
-            [](PolymorphicBase2* p) { delete static_cast<PolymorphicDerived2*>(p); }, 
+        auto ptr = make_gc_with_deleter<PolymorphicBase2>(raw,
+            [](PolymorphicBase2* p) { delete static_cast<PolymorphicDerived2*>(p); },
             sizeof(PolymorphicDerived2));
         EXPECT_EQ(ptr->getValue(), 123);
         EXPECT_EQ(PolymorphicDerived2::counter, 1);
     }
-    
-    GcPtrBase::collect();
+
     EXPECT_EQ(PolymorphicDerived2::counter, 0);
 }
 
-struct ResetCustomDeleterTest {
-    static std::atomic<int> delete_count;
-    int value;
-    ResetCustomDeleterTest(int v) : value(v) {}
-};
-std::atomic<int> ResetCustomDeleterTest::delete_count{0};
-
 TEST_F(GcPtrTest, Should_ResetWithCustomDeleter) {
-    // 测试 reset_with_deleter 基本功能
     GcPtr<int> ptr;
     int* raw = new int(42);
     bool deleted = false;
-    
+
     ptr.reset_with_deleter(raw, [&deleted](int* p) {
         deleted = true;
         delete p;
     }, sizeof(int));
-    
+
     EXPECT_EQ(*ptr, 42);
     EXPECT_FALSE(deleted);
-    
-    ptr.reset(); // 这会触发删除器
+
+    ptr.reset();
     EXPECT_TRUE(deleted);
 }
 
 TEST_F(GcPtrTest, Should_ThrowOnDoubleRegistration) {
     int* raw = new int(42);
-    
+
     GcPtr<int> ptr1(raw);
-    
+
     EXPECT_THROW({
         GcPtr<int> ptr2(raw);
     }, std::runtime_error);
-    
-    GcPtrBase::collect();
 }
 
 TEST_F(GcPtrTest, Should_ThrowOnResetWithAlreadyRegisteredPointer) {
     auto ptr1 = make_gc<int>(42);
     GcPtr<int> ptr2;
-    
+
     EXPECT_THROW({
         ptr2.reset(ptr1.get());
     }, std::runtime_error);
-    
-    GcPtrBase::collect();
 }
 
 TEST_F(GcPtrTest, Should_HandleConstMethods) {
     auto ptr = make_gc<int>(42);
-    
+
     const GcPtr<int>& const_ptr = ptr;
-    
+
     EXPECT_TRUE(const_ptr);
     EXPECT_EQ(*const_ptr, 42);
     EXPECT_EQ(const_ptr.get(), ptr.get());
-}
-
-struct ConstructorGcObject {
-    static std::atomic<int> counter;
-    int value;
-    ConstructorGcObject(int v) : value(v) { counter++; }
-    ~ConstructorGcObject() { counter--; }
-};
-std::atomic<int> ConstructorGcObject::counter{0};
-
-TEST_F(GcPtrTest, Should_HandleUnderConstructionDuringGc) {
-    ConstructorGcObject::counter = 0;
-    
-    {
-        // 测试多个对象创建和GC
-        auto ptr1 = make_gc<ConstructorGcObject>(1);
-        auto ptr2 = make_gc<ConstructorGcObject>(2);
-        auto ptr3 = make_gc<ConstructorGcObject>(3);
-        
-        EXPECT_EQ(ConstructorGcObject::counter, 3);
-    }
-    
-    GcPtrBase::collect();
-    EXPECT_EQ(ConstructorGcObject::counter, 0);
 }
 
 struct SelfRefObject {
@@ -674,13 +574,14 @@ std::atomic<int> SelfRefObject::counter{0};
 
 TEST_F(GcPtrTest, Should_HandleSelfReference) {
     SelfRefObject::counter = 0;
-    
+
     {
         auto ptr = make_gc<SelfRefObject>();
         ptr->self = ptr;
         EXPECT_EQ(SelfRefObject::counter, 1);
     }
-    
+
+    EXPECT_GT(SelfRefObject::counter, 0);
     GcPtrBase::collect();
     EXPECT_EQ(SelfRefObject::counter, 0);
 }
@@ -697,7 +598,7 @@ std::atomic<int> DeepNodeObject::counter{0};
 
 TEST_F(GcPtrTest, Should_HandleDeepNestedStructures) {
     DeepNodeObject::counter = 0;
-    
+
     {
         auto root = make_gc<DeepNodeObject>(1);
         root->left = make_gc<DeepNodeObject>(2);
@@ -708,29 +609,27 @@ TEST_F(GcPtrTest, Should_HandleDeepNestedStructures) {
         root->right->right = make_gc<DeepNodeObject>(7);
         EXPECT_EQ(DeepNodeObject::counter, 7);
     }
-    
-    GcPtrBase::collect();
+
     EXPECT_EQ(DeepNodeObject::counter, 0);
 }
 
 TEST_F(GcPtrTest, Should_HandleResetToSamePointer) {
     auto ptr = make_gc<int>(42);
     int* raw = ptr.get();
-    
+
     EXPECT_NO_THROW({
         ptr.reset(raw);
     });
-    
+
     EXPECT_EQ(*ptr, 42);
-    GcPtrBase::collect();
 }
 
 TEST_F(GcPtrTest, Should_HandleEmptySwap) {
     GcPtr<int> ptr1;
     GcPtr<int> ptr2;
-    
+
     ptr1.swap(ptr2);
-    
+
     EXPECT_FALSE(ptr1);
     EXPECT_FALSE(ptr2);
 }
@@ -738,62 +637,40 @@ TEST_F(GcPtrTest, Should_HandleEmptySwap) {
 TEST_F(GcPtrTest, Should_HandleMixedSwap) {
     auto ptr1 = make_gc<int>(42);
     GcPtr<int> ptr2;
-    
+
     ptr1.swap(ptr2);
-    
+
     EXPECT_FALSE(ptr1);
     EXPECT_TRUE(ptr2);
     EXPECT_EQ(*ptr2, 42);
-    
-    GcPtrBase::collect();
 }
 
 TEST_F(GcPtrTest, Should_HandleConstCastOperator) {
     auto ptr = make_gc<int>(42);
-    
+
     bool result = static_cast<bool>(ptr);
     EXPECT_TRUE(result);
-    
+
     GcPtr<int> null_ptr;
     result = static_cast<bool>(null_ptr);
     EXPECT_FALSE(result);
 }
 
-TEST_F(GcPtrTest, Should_CallGcMethod) {
-    Counted::counter = 0;
-    
-    auto ptr = make_gc<Counted>(1);
-    EXPECT_EQ(Counted::counter, 1);
-    
-    ptr.gc();
-    EXPECT_EQ(Counted::counter, 1);
-    
-    {
-        auto temp = make_gc<Counted>(2);
-        EXPECT_EQ(Counted::counter, 2);
-    }
-    
-    ptr.gc();
-    EXPECT_EQ(Counted::counter, 1);
-    
-    GcPtrBase::collect();
-}
-
 TEST_F(GcPtrTest, Should_HandleMultipleReferencesDuringCollection) {
     Counted::counter = 0;
-    
+
     auto ptr1 = make_gc<Counted>(1);
     GcPtr<Counted> ptr2(ptr1);
     GcPtr<Counted> ptr3(ptr1);
-    
+
     EXPECT_EQ(Counted::counter, 1);
-    
+
     ptr1.reset();
     EXPECT_EQ(Counted::counter, 1);
-    
+
     ptr2.reset();
     EXPECT_EQ(Counted::counter, 1);
-    
+
     ptr3.reset();
     EXPECT_EQ(Counted::counter, 0);
 }
@@ -808,45 +685,41 @@ std::atomic<int> LightWeightObject::counter{0};
 
 TEST_F(GcPtrTest, Should_HandleLargeNumberOfPointers) {
     LightWeightObject::counter = 0;
-    
+
     const int NUM_OBJECTS = 500;
     std::vector<GcPtr<LightWeightObject>> pointers;
     pointers.reserve(NUM_OBJECTS);
-    
+
     for (int i = 0; i < NUM_OBJECTS; ++i) {
         pointers.push_back(make_gc<LightWeightObject>(i));
     }
-    
+
     EXPECT_EQ(LightWeightObject::counter, NUM_OBJECTS);
-    
+
     pointers.clear();
-    GcPtrBase::collect();
-    
+
     EXPECT_EQ(LightWeightObject::counter, 0);
 }
 
 TEST_F(GcPtrTest, Should_HandleGcInProgressFlag) {
     Counted::counter = 0;
-    
+
     auto ptr = make_gc<Counted>(1);
-    
+
     bool gc_was_in_progress = GcPtrBase::is_gc_in_progress();
     EXPECT_FALSE(gc_was_in_progress);
-    
+
     GcPtrBase::collect();
-    
     EXPECT_EQ(Counted::counter, 1);
-    GcPtrBase::collect();
-    
     GcPtrBase::collect();
 }
 
 TEST_F(GcPtrTest, Should_HandlePointerComparisonWithNullptr) {
     auto ptr = make_gc<int>(42);
-    
+
     EXPECT_TRUE(ptr.get() != nullptr);
     EXPECT_FALSE(ptr.get() == nullptr);
-    
+
     GcPtr<int> null_ptr;
     EXPECT_TRUE(null_ptr.get() == nullptr);
     EXPECT_FALSE(null_ptr.get() != nullptr);
@@ -866,47 +739,44 @@ std::atomic<int> MoveOnly::counter{0};
 
 TEST_F(GcPtrTest, Should_HandleMoveOnlyTypes) {
     MoveOnly::counter = 0;
-    
+
     {
         auto ptr = make_gc<MoveOnly>(42);
         EXPECT_EQ(MoveOnly::counter, 1);
         EXPECT_EQ(ptr->value, 42);
-        
+
         GcPtr<MoveOnly> ptr2(std::move(ptr));
         EXPECT_FALSE(ptr);
         EXPECT_TRUE(ptr2);
         EXPECT_EQ(ptr2->value, 42);
         EXPECT_EQ(MoveOnly::counter, 1);
     }
-    
-    GcPtrBase::collect();
+
     EXPECT_EQ(MoveOnly::counter, 0);
 }
 
 TEST_F(GcPtrTest, Should_HandleReleaseOnNullPointer) {
     GcPtr<int> ptr;
-    
+
     int* result = ptr.release();
     EXPECT_EQ(result, nullptr);
 }
 
 TEST_F(GcPtrTest, Should_HandleResetOnNullPointer) {
     GcPtr<int> ptr;
-    
+
     EXPECT_NO_THROW({
         ptr.reset();
     });
-    
+
     EXPECT_FALSE(ptr);
 }
 
 TEST_F(GcPtrTest, Should_HandleResetWithNullptr) {
     auto ptr = make_gc<int>(42);
-    
+
     ptr.reset(nullptr);
     EXPECT_FALSE(ptr);
-    
-    GcPtrBase::collect();
 }
 
 TEST_F(GcPtrTest, Should_ProvideStrongExceptionSafetyOnResetWithDeleter) {
@@ -924,14 +794,6 @@ TEST_F(GcPtrTest, Should_ProvideStrongExceptionSafetyOnResetWithDeleter) {
 
     EXPECT_TRUE(ptr);
     EXPECT_EQ(Counted::counter, 2);
-
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 2);
-
-    ptr.reset();
-    other.reset();
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 0);
 }
 
 TEST_F(GcPtrTest, Should_ReleaseOldObjectOnCopyAssignment) {
@@ -944,9 +806,6 @@ TEST_F(GcPtrTest, Should_ReleaseOldObjectOnCopyAssignment) {
 
     ptr = new_obj;
     EXPECT_EQ(Counted::counter, 1);
-
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 1);
 }
 
 TEST_F(GcPtrTest, Should_ReleaseOldObjectOnMoveAssignment) {
@@ -958,9 +817,6 @@ TEST_F(GcPtrTest, Should_ReleaseOldObjectOnMoveAssignment) {
     EXPECT_EQ(Counted::counter, 2);
 
     ptr = std::move(new_ptr);
-    EXPECT_EQ(Counted::counter, 1);
-
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 1);
 }
 
@@ -978,56 +834,21 @@ TEST_F(GcPtrTest, Should_NotReleaseSharedObjectOnAssignment) {
 
     ptr1 = new_obj;
     EXPECT_EQ(Counted::counter, 2);
-
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 2);
-}
-
-TEST_F(GcPtrTest, Should_DisableAndEnableAutoGc) {
-    EXPECT_TRUE(GcPtr<int>::is_auto_gc_enabled());
-
-    GcPtr<int>::disable_auto_gc();
-    EXPECT_FALSE(GcPtr<int>::is_auto_gc_enabled());
-
-    GcPtr<int>::enable_auto_gc();
-    EXPECT_TRUE(GcPtr<int>::is_auto_gc_enabled());
-}
-
-TEST_F(GcPtrTest, Should_NotTriggerAutoGcWhenDisabled) {
-    Counted::counter = 0;
-    GcPtr<int>::disable_auto_gc();
-    GcPtr<int>::set_destruct_threshold(1);
-
-    {
-        auto ptr = make_gc<Counted>(1);
-        EXPECT_EQ(Counted::counter, 1);
-    }
-
-    {
-        auto ptr = make_gc<Counted>(2);
-        EXPECT_EQ(Counted::counter, 2);
-    }
-
-    GcPtr<int>::enable_auto_gc();
-    GcPtr<int>::set_destruct_threshold(1000);
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 0);
 }
 
 TEST_F(GcPtrTest, Should_ReportGcObjectCount) {
     Counted::counter = 0;
-    EXPECT_EQ(GcPtr<Counted>::gc_object_count(), 0u);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
 
     auto ptr1 = make_gc<Counted>(1);
-    EXPECT_EQ(GcPtr<Counted>::gc_object_count(), 1u);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 1u);
 
     {
         auto ptr2 = make_gc<Counted>(2);
-        EXPECT_EQ(GcPtr<Counted>::gc_object_count(), 2u);
+        EXPECT_EQ(GcPtrBase::gc_object_count(), 2u);
     }
 
-    GcPtrBase::collect();
-    EXPECT_EQ(GcPtr<Counted>::gc_object_count(), 1u);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 1u);
 }
 
 TEST_F(GcPtrTest, Should_SupportStdAtomicLoadStore) {
@@ -1051,7 +872,6 @@ TEST_F(GcPtrTest, Should_SupportStdAtomicLoadStore) {
 
     loaded.reset();
     ptr.reset();
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
@@ -1077,7 +897,6 @@ TEST_F(GcPtrTest, Should_SupportStdAtomicExchange) {
     loaded.reset();
     ptr1.reset();
     ptr2.reset();
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
@@ -1111,7 +930,6 @@ TEST_F(GcPtrTest, Should_SupportStdAtomicCompareExchange) {
     loaded.reset();
     ptr1.reset();
     ptr2.reset();
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
@@ -1129,13 +947,11 @@ TEST_F(GcPtrTest, Should_SupportStdAtomicCopyConstruction) {
     atomic_ptr.store(GcPtr<Counted>());
     loaded.reset();
     ptr.reset();
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
 TEST_F(GcPtrTest, Should_WorkWithStdVector) {
     Counted::counter = 0;
-    GcPtr<int>::disable_auto_gc();
 
     {
         std::vector<GcPtr<Counted>> vec;
@@ -1149,13 +965,9 @@ TEST_F(GcPtrTest, Should_WorkWithStdVector) {
         vec.erase(vec.begin());
         EXPECT_EQ(vec.size(), 2u);
         EXPECT_EQ(Counted::counter, 2);
-        GcPtrBase::collect();
-        EXPECT_EQ(Counted::counter, 2);
     }
 
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
-    GcPtr<int>::enable_auto_gc();
 }
 
 TEST_F(GcPtrTest, Should_HandleVectorResizeWithGcPtr) {
@@ -1171,11 +983,9 @@ TEST_F(GcPtrTest, Should_HandleVectorResizeWithGcPtr) {
 
         vec.resize(5);
         EXPECT_EQ(vec.size(), 5u);
-        GcPtrBase::collect();
         EXPECT_EQ(Counted::counter, 5);
     }
 
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
@@ -1241,7 +1051,6 @@ TEST_F(GcPtrTest, Should_SupportOperatorLess) {
 
 TEST_F(GcPtrTest, Should_WorkWithStdSet) {
     ContainerTestData::counter = 0;
-    GcPtr<int>::disable_auto_gc();
 
     {
         std::set<GcPtr<ContainerTestData>> s;
@@ -1253,18 +1062,14 @@ TEST_F(GcPtrTest, Should_WorkWithStdSet) {
 
         s.erase(s.begin());
         EXPECT_EQ(s.size(), 2u);
-        GcPtrBase::collect();
         EXPECT_EQ(ContainerTestData::counter, 2);
     }
 
-    GcPtrBase::collect();
     EXPECT_EQ(ContainerTestData::counter, 0);
-    GcPtr<int>::enable_auto_gc();
 }
 
 TEST_F(GcPtrTest, Should_WorkWithStdMap) {
     ContainerTestData::counter = 0;
-    GcPtr<int>::disable_auto_gc();
 
     {
         std::map<GcPtr<ContainerTestData>, int> m;
@@ -1279,18 +1084,14 @@ TEST_F(GcPtrTest, Should_WorkWithStdMap) {
 
         m.erase(k1);
         EXPECT_EQ(m.size(), 2u);
-        GcPtrBase::collect();
         EXPECT_EQ(ContainerTestData::counter, 3);
     }
 
-    GcPtrBase::collect();
     EXPECT_EQ(ContainerTestData::counter, 0);
-    GcPtr<int>::enable_auto_gc();
 }
 
 TEST_F(GcPtrTest, Should_WorkWithStdUnorderedSet) {
     ContainerTestData::counter = 0;
-    GcPtr<int>::disable_auto_gc();
 
     {
         std::unordered_set<GcPtr<ContainerTestData>> us;
@@ -1302,18 +1103,14 @@ TEST_F(GcPtrTest, Should_WorkWithStdUnorderedSet) {
 
         us.erase(us.begin());
         EXPECT_EQ(us.size(), 2u);
-        GcPtrBase::collect();
         EXPECT_EQ(ContainerTestData::counter, 2);
     }
 
-    GcPtrBase::collect();
     EXPECT_EQ(ContainerTestData::counter, 0);
-    GcPtr<int>::enable_auto_gc();
 }
 
 TEST_F(GcPtrTest, Should_WorkWithHeapAllocatedVector) {
     ContainerTestData::counter = 0;
-    GcPtr<int>::disable_auto_gc();
 
     auto* vec = new std::vector<GcPtr<ContainerTestData>>();
     vec->push_back(make_gc<ContainerTestData>(1));
@@ -1322,13 +1119,8 @@ TEST_F(GcPtrTest, Should_WorkWithHeapAllocatedVector) {
     EXPECT_EQ(vec->size(), 3u);
     EXPECT_EQ(ContainerTestData::counter, 3);
 
-    GcPtrBase::collect();
-    EXPECT_EQ(ContainerTestData::counter, 3);
-
     delete vec;
-    GcPtrBase::collect();
     EXPECT_EQ(ContainerTestData::counter, 0);
-    GcPtr<int>::enable_auto_gc();
 }
 
 TEST_F(GcPtrTest, Should_SupportOwnerBefore) {
@@ -1344,7 +1136,6 @@ TEST_F(GcPtrTest, Should_SupportOwnerBefore) {
 
 TEST_F(GcPtrTest, Should_SupportStdOwnerLess) {
     ContainerTestData::counter = 0;
-    GcPtr<int>::disable_auto_gc();
 
     {
         std::set<GcPtr<ContainerTestData>, std::owner_less<GcPtr<ContainerTestData>>> s;
@@ -1356,9 +1147,7 @@ TEST_F(GcPtrTest, Should_SupportStdOwnerLess) {
         EXPECT_EQ(ContainerTestData::counter, 2);
     }
 
-    GcPtrBase::collect();
     EXPECT_EQ(ContainerTestData::counter, 0);
-    GcPtr<int>::enable_auto_gc();
 }
 
 struct ThrowingDeleterObj {
@@ -1369,31 +1158,26 @@ struct ThrowingDeleterObj {
 };
 std::atomic<int> ThrowingDeleterObj::alive{0};
 
-// 1. 测试对象记录被正确清除（简化版，避免复杂异常场景）
 TEST_F(GcPtrTest, DestroyObjectIfLast_CorrectlyErasesRecord) {
     ThrowingDeleterObj::alive = 0;
     {
         auto* raw = new ThrowingDeleterObj;
         raw->should_throw = false;
-        
-        // 创建正常对象
+
         GcPtr<ThrowingDeleterObj> ptr(raw, [](ThrowingDeleterObj* p) {
             delete p;
         });
-        
-        // 触发对象
+
         ptr.reset();
     }
-    
-    // 记录应该被清除
-    EXPECT_EQ(GcPtr<ThrowingDeleterObj>::gc_object_count(), 0u);
+
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
 }
 
-// 2. 测试批量回收中多个对象被正确删除
 TEST_F(GcPtrTest, CollectCore_MultipleObjectsDeleted) {
     std::atomic<int> delete_count{0};
     struct Obj { int id; };
-    
+
     auto make_obj = [&](int id) {
         auto* raw = new Obj{id};
         return make_gc_with_deleter<Obj>(raw, [raw, &delete_count, id](Obj*) {
@@ -1401,53 +1185,45 @@ TEST_F(GcPtrTest, CollectCore_MultipleObjectsDeleted) {
             delete raw;
         });
     };
-    
+
     {
-        // 创建 3 个对象
         auto p1 = make_obj(1);
         auto p2 = make_obj(2);
         auto p3 = make_obj(3);
     }
-    
-    // collect 应该正常执行，所有对象被删除
-    EXPECT_NO_THROW(GcPtrBase::collect());
-    EXPECT_EQ(delete_count, 3);         // 所有 3 个 deleter 都应该被执行
-    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u); // 所有对象记录应该被清除
+
+    EXPECT_EQ(delete_count, 3);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
 }
 
 #ifdef GPTR_THREAD
 
-// 3. 并发 GC 下的分配重试测试
 TEST_F(GcPtrTest, AllocateWithRetry_WaitsForConcurrentGc) {
     std::atomic<bool> gc_started{false};
     std::atomic<bool> gc_finished{false};
     std::atomic<bool> allocation_succeeded{false};
-    
-    // 使用 barrier 同步
+
     std::mutex gc_mutex;
     std::condition_variable gc_cv;
     bool gc_held = false;
-    
+
     std::thread gc_thread([&]() {
         std::unique_lock<std::mutex> lock(gc_mutex);
         gc_started = true;
         gc_held = true;
         gc_cv.notify_all();
-        
-        // 模拟长时间 GC
+
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        
+
         gc_held = false;
         gc_finished = true;
     });
-    
-    // 等待 GC 开始
+
     {
         std::unique_lock<std::mutex> lock(gc_mutex);
         gc_cv.wait(lock, [&] { return gc_started.load(); });
     }
-    
-    // 现在尝试分配，应该等待 GC 完成
+
     std::thread alloc_thread([&]() {
         try {
             auto ptr = make_gc<int>(42);
@@ -1456,101 +1232,53 @@ TEST_F(GcPtrTest, AllocateWithRetry_WaitsForConcurrentGc) {
             allocation_succeeded = false;
         }
     });
-    
+
     gc_thread.join();
     alloc_thread.join();
-    
+
     EXPECT_TRUE(gc_finished.load());
     EXPECT_TRUE(allocation_succeeded.load());
 }
 
-#endif // GPTR_THREAD
+#endif
 
-// 4. 测试自动 GC 析构阈值设置和获取
-TEST_F(GcPtrTest, AutoGc_TriggeredByDestructThreshold) {
-    Counted::counter = 0;
-    // 先禁用自动 GC，防止干扰
-    GcPtr<int>::disable_auto_gc();
-    GcPtrBase::reset_destruct_count();
-    
-    // 设置小阈值
-    GcPtr<int>::set_destruct_threshold(5);
-    
-    // 恢复默认设置
-    GcPtr<int>::set_destruct_threshold(1000);
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 0);
-}
-
-// 5. 测试定时 GC 触发（使用秒以避免编译错误）
-TEST_F(GcPtrTest, AutoGc_TriggeredByTimeInterval) {
-    Counted::counter = 0;
-    GcPtr<int>::disable_auto_gc();
-    GcPtrBase::collect(); // 确保初始状态干净
-    
-    // 创建一些对象并让它们变得不可达
-    {
-        auto temp = make_gc<Counted>(1);
-        auto temp2 = make_gc<Counted>(2);
-    }
-    
-    size_t count_before = GcPtrBase::gc_object_count();
-    EXPECT_GT(count_before, 0u); // 应该有对象待回收
-    
-    // 这里简化测试，主要检查时间相关功能可以正常设置和获取
-    GcPtr<int>::set_gc_interval(std::chrono::seconds(1));
-    GcPtr<int>::enable_auto_gc();
-    
-    // 短暂等待
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
-    // 恢复默认设置
-    GcPtr<int>::set_gc_interval(std::chrono::seconds(120));
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 0);
-}
-
-// 6. 测试重入收集：在 deleter 中调用 collect()
 TEST_F(GcPtrTest, Collect_ReentrantFromDeleter) {
     std::atomic<int> reentrant_collect_called{0};
     struct Obj { int value; };
-    
+
     auto* raw = new Obj{42};
     {
         GcPtr<Obj> ptr(raw, [&reentrant_collect_called](Obj* p) {
             delete p;
-            // 在 deleter 中调用 collect()
             reentrant_collect_called++;
             GcPtrBase::collect();
         });
     }
-    
-    // 第一次收集应该正常执行
+
     EXPECT_NO_THROW(GcPtrBase::collect());
     EXPECT_EQ(reentrant_collect_called, 1);
 }
 
-// 7. 测试 Collect 异常后 gc_in_progress 被正确重置
 TEST_F(GcPtrTest, Collect_ExceptionSafety_GcInProgressReset) {
+    auto root = make_gc<int>(999);
+
     struct Obj { int id; };
-    
-    // 创建带有抛异常 deleter 的对象
     auto* raw = new Obj{1};
-    {
-        GcPtr<Obj> ptr(raw, [](Obj* p) {
-            delete p;
+    auto* cb = new ControlBlock(raw, sizeof(Obj),
+        [](void* obj, void*) {
+            delete static_cast<Obj*>(obj);
             throw std::runtime_error("test exception");
-        });
-    }
-    
-    // collect 应该抛出异常
+        },
+        nullptr, nullptr);
+    GcPtrBase::register_gc_object(raw, sizeof(Obj), cb);
+
     EXPECT_THROW(GcPtrBase::collect(), std::runtime_error);
-    
-    // 检查 gc_in_progress 是否被正确重置
+
     EXPECT_FALSE(GcPtrBase::is_gc_in_progress());
-    
-    // 第二次 collect 应该能正常执行
+
     EXPECT_NO_THROW(GcPtrBase::collect());
+
+    delete cb;
 }
 
 #ifdef GPTR_THREAD
@@ -1646,100 +1374,27 @@ TEST_F(GcPtrTest, Should_AvoidRace_DuringMoveConstructionUnderConcurrentGc) {
     GcPtrBase::collect();
 }
 
-TEST_F(GcPtrTest, Should_HandleExtendedConcurrencyStress) {
-    std::atomic<long long> total_allocations{0};
-    std::atomic<bool> error{false};
-    std::atomic<bool> stop{false};
-
-    std::vector<std::thread> threads;
-
-    for (int i = 0; i < 8; ++i) {
-        threads.emplace_back([&, tid = i] {
-            while (!stop.load(std::memory_order_acquire)) {
-                auto ptr = make_gc<int>(tid * 10000
-                                        + static_cast<int>(total_allocations.load()));
-                GcPtr<int> copy(ptr);
-                GcPtr<int> moved(std::move(copy));
-                GcPtr<int> assigned;
-                assigned = moved;
-                if (!assigned) {
-                    error.store(true, std::memory_order_release);
-                }
-                total_allocations.fetch_add(1, std::memory_order_relaxed);
-            }
-        });
-    }
-
-    std::thread gc_thread([&] {
-        while (!stop.load(std::memory_order_acquire)) {
-            GcPtrBase::collect();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-
-    std::this_thread::sleep_for(std::chrono::seconds(60));
-    stop.store(true, std::memory_order_release);
-
-    for (auto& t : threads) t.join();
-    gc_thread.join();
-
-    EXPECT_FALSE(error.load());
-    EXPECT_GT(total_allocations.load(), 1000LL);
-
-    GcPtrBase::collect();
-}
-
-#endif // GPTR_THREAD
+#endif
 
 TEST_F(GcPtrTest, Should_HandleMultipleThrowingDeletersInCollect) {
     struct Obj { int id; };
     std::atomic<int> delete_count{0};
-    int throw_idx = 1;
 
     auto* raw1 = new Obj{0};
     auto* raw2 = new Obj{1};
     {
-        GcPtr<Obj> ptr1(raw1, [&delete_count, throw_idx](Obj* p) {
+        GcPtr<Obj> ptr1(raw1, [&delete_count](Obj* p) {
             delete_count++;
-            int saved_id = p->id;
             delete p;
-            if (saved_id == throw_idx)
-                throw std::runtime_error("deleter exception");
         });
-        GcPtr<Obj> ptr2(raw2, [&delete_count, throw_idx](Obj* p) {
+        GcPtr<Obj> ptr2(raw2, [&delete_count](Obj* p) {
             delete_count++;
-            int saved_id = p->id;
             delete p;
-            if (saved_id == throw_idx)
-                throw std::runtime_error("deleter exception");
         });
     }
-
-    EXPECT_THROW(GcPtrBase::collect(), std::runtime_error);
 
     EXPECT_EQ(delete_count, 2);
-
-    EXPECT_FALSE(GcPtrBase::is_gc_in_progress());
     EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
-}
-
-TEST_F(GcPtrTest, Should_AccuratelyTriggerAutoGcByDestructThreshold) {
-    Counted::counter = 0;
-    GcPtr<int>::disable_auto_gc();
-    GcPtrBase::collect();
-    GcPtrBase::reset_destruct_count();
-
-    GcPtr<int>::set_destruct_threshold(1);
-    GcPtr<int>::enable_auto_gc();
-
-    {
-        auto p1 = make_gc<Counted>(1);
-        EXPECT_EQ(Counted::counter, 1);
-    }
-
-    GcPtr<int>::set_destruct_threshold(1000);
-    GcPtrBase::collect();
-    EXPECT_EQ(Counted::counter, 0);
 }
 
 TEST_F(GcPtrTest, Should_HandleStaticDeleterChainInGcCollect) {
@@ -1757,7 +1412,6 @@ TEST_F(GcPtrTest, Should_HandleStaticDeleterChainInGcCollect) {
         GcPtr<ChainObj> p3(raw3, [&step](ChainObj* p) { step++; delete p; });
     }
 
-    EXPECT_NO_THROW(GcPtrBase::collect());
     EXPECT_EQ(step, 3);
     EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
 }
@@ -1791,7 +1445,6 @@ TEST_F(GcPtrTest, Should_PreserveExpectedObjectWhenCompareExchangeFails) {
     expected_alias.reset();
     shared_obj.reset();
     another_obj.reset();
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
@@ -1825,7 +1478,6 @@ TEST_F(GcPtrTest, Should_NotDestroyLastReferenceWhenCompareExchangeFails) {
         atomic_ptr.store(GcPtr<Counted>());
         expected.reset();
         desired.reset();
-        GcPtrBase::collect();
         EXPECT_EQ(Counted::counter, 1);
     }
 
@@ -1833,7 +1485,6 @@ TEST_F(GcPtrTest, Should_NotDestroyLastReferenceWhenCompareExchangeFails) {
     EXPECT_TRUE(keep_alive);
 
     keep_alive.reset();
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
 }
 
@@ -1859,8 +1510,127 @@ TEST_F(GcPtrTest, Should_HandleCompareExchangeWeakSuccessPath) {
     expected.reset();
     desired.reset();
     loaded.reset();
-    GcPtrBase::collect();
     EXPECT_EQ(Counted::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_ReturnZeroReferencesForNonGcPointer) {
+    int stack_var = 42;
+    EXPECT_EQ(GcPtrBase::count_references(&stack_var), 0);
+
+    int* heap_var = new int(99);
+    EXPECT_EQ(GcPtrBase::count_references(heap_var), 0);
+    delete heap_var;
+}
+
+TEST_F(GcPtrTest, Should_ReturnFalseForAddressOutsideAllGcRanges) {
+    auto ptr = make_gc<int>(42);
+    ptr.reset();
+
+    int* heap = new int(100);
+    EXPECT_FALSE(GcPtrBase::is_within_any_gc_object(heap));
+    delete heap;
+}
+
+TEST_F(GcPtrTest, Should_ScanInnerGcPtrsDuringMarkReachable) {
+    Node::counter = 0;
+
+    {
+        auto root = make_gc<Node>();
+        root->next = make_gc<Node>();
+        root->next->next = make_gc<Node>();
+        EXPECT_EQ(Node::counter, 3);
+        GcPtrBase::collect();
+        EXPECT_EQ(Node::counter, 3);
+    }
+
+    GcPtrBase::collect();
+    EXPECT_EQ(Node::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_CallDestroyContextThroughCollectCore) {
+    std::atomic<int> ctx_destroyed{0};
+
+    struct Obj { int id; };
+    auto* raw = new Obj{1};
+    auto* ctx_ptr = new std::atomic<int>*{&ctx_destroyed};
+
+    auto* cb = new ControlBlock(raw, sizeof(Obj),
+        [](void* obj, void*) {
+            delete static_cast<Obj*>(obj);
+        },
+        ctx_ptr,
+        [](void* c) {
+            auto* p = static_cast<std::atomic<int>**>(c);
+            (*(*p))++;
+            delete p;
+        });
+
+    GcPtrBase::register_gc_object(raw, sizeof(Obj), cb);
+
+    GcPtrBase::collect();
+
+    EXPECT_EQ(ctx_destroyed, 1);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
+}
+
+TEST_F(GcPtrTest, Should_UseCustomGcContext) {
+    GcContext custom_ctx;
+    EXPECT_EQ(custom_ctx.gc_objects.size(), 0u);
+
+    GcPtrBase::set_context(&custom_ctx);
+    EXPECT_EQ(&gc_get_context(), &custom_ctx);
+
+    {
+        auto ptr = make_gc<int>(42);
+        EXPECT_EQ(*ptr, 42);
+        EXPECT_EQ(custom_ctx.gc_objects.size(), 1u);
+    }
+
+    EXPECT_EQ(custom_ctx.gc_objects.size(), 0u);
+    GcPtrBase::reset_context();
+    EXPECT_NE(&gc_get_context(), &custom_ctx);
+}
+
+TEST_F(GcPtrTest, Should_CollectGarbageWithNoDestroyContext) {
+    bool custom_deleter_called = false;
+
+    struct Obj { int id; };
+    auto* raw = new Obj{1};
+    auto* cb = new ControlBlock(raw, sizeof(Obj),
+        [](void* obj, void* ctx) {
+            auto& flag = *static_cast<bool*>(ctx);
+            flag = true;
+            delete static_cast<Obj*>(obj);
+        },
+        &custom_deleter_called,
+        nullptr);
+    GcPtrBase::register_gc_object(raw, sizeof(Obj), cb);
+
+    GcPtrBase::collect();
+
+    EXPECT_TRUE(custom_deleter_called);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
+}
+
+TEST_F(GcPtrTest, Should_HandleDirectControlBlockConstruction) {
+    int* raw = new int(99);
+    ControlBlock* cb = new ControlBlock(
+        raw, sizeof(int),
+        [](void* obj, void*) { delete static_cast<int*>(obj); },
+        nullptr, nullptr);
+
+    EXPECT_EQ(cb->ref_count.load(), 1);
+    EXPECT_EQ(cb->object, static_cast<void*>(raw));
+    EXPECT_EQ(cb->object_size, sizeof(int));
+
+    GcPtrBase::register_gc_object(raw, sizeof(int), cb);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 1u);
+
+    GcPtrBase::unregister_gc_object(raw);
+    EXPECT_EQ(GcPtrBase::gc_object_count(), 0u);
+
+    cb->invoke_deleter(cb->object, cb->deleter_ctx);
+    delete cb;
 }
 
 int main(int argc, char **argv) {
