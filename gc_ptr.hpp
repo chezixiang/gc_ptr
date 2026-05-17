@@ -53,8 +53,13 @@ struct GcContext {
     std::atomic<bool> time_initialized{false};
     std::atomic<bool> auto_gc_enabled{true};
 
+    #ifdef GPTR_THREAD
     std::atomic<bool> gc_in_progress{false};
     std::atomic<bool> gc_pending{false};
+#else
+    bool gc_in_progress = false;
+    bool gc_pending = false;
+#endif
 };
 
 #ifndef GC_PTR_API
@@ -385,8 +390,8 @@ public:
             }
 #else
             auto& ctx = gc_get_context();
-            if (ctx.gc_in_progress.load(std::memory_order_acquire)) {
-                ctx.gc_pending.store(true, std::memory_order_release);
+            if (ctx.gc_in_progress) {
+                ctx.gc_pending = true;
                 try {
                     p = alloc_func();
                     return p;
@@ -403,8 +408,14 @@ public:
 
     static void run_pending_gc() {
         auto& ctx = gc_get_context();
+#ifdef GPTR_THREAD
         bool pending = ctx.gc_pending.exchange(false, std::memory_order_acq_rel);
         if (pending && !ctx.gc_in_progress.load(std::memory_order_acquire)) {
+#else
+        bool pending = ctx.gc_pending;
+        ctx.gc_pending = false;
+        if (pending && !ctx.gc_in_progress) {
+#endif
             collect();
         }
     }
@@ -465,8 +476,14 @@ public:
 public:
     static void collect() {
         auto& ctx = gc_get_context();
+#ifdef GPTR_THREAD
         if (ctx.gc_in_progress.exchange(true, std::memory_order_acq_rel))
             return;
+#else
+        if (ctx.gc_in_progress)
+            return;
+        ctx.gc_in_progress = true;
+#endif
 #ifdef GPTR_THREAD
         std::lock_guard<std::recursive_mutex> lock(gc_mutex());
 #endif
@@ -474,11 +491,19 @@ public:
         try {
             collect_core();
         } catch (...) {
+#ifdef GPTR_THREAD
             ctx.gc_in_progress.store(false, std::memory_order_release);
+#else
+            ctx.gc_in_progress = false;
+#endif
             throw;
         }
 
+#ifdef GPTR_THREAD
         ctx.gc_in_progress.store(false, std::memory_order_release);
+#else
+        ctx.gc_in_progress = false;
+#endif
         run_pending_gc();
     }
 
@@ -537,7 +562,11 @@ public:
 #ifdef GC_PTR_EXPOSE_INTERNALS
     [[nodiscard]] static bool is_gc_in_progress() {
         auto& ctx = gc_get_context();
+#ifdef GPTR_THREAD
         return ctx.gc_in_progress.load(std::memory_order_acquire);
+#else
+        return ctx.gc_in_progress;
+#endif
     }
 
     [[nodiscard]] static std::size_t get_destruct_count() {
