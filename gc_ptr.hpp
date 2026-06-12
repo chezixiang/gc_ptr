@@ -575,6 +575,10 @@ private:
         if (!cb_)
             return;
         if (cb_->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            if (gc_get_context().gc_in_progress.load(std::memory_order_acquire)) {
+                cb_->ref_count.store(1, std::memory_order_release);
+                return;
+            }
             if (cb_->invoke_deleter)
                 cb_->invoke_deleter(cb_->object, cb_->deleter_ctx);
             if (cb_->destroy_ctx)
