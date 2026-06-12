@@ -340,8 +340,15 @@ public:
 
         cb_ = cb;
         ptr_ = obj;
-        GcPtrBase::register_gc_object(obj, sizeof(T), cb);
-        GcPtrBase::register_gcptr(this, cb);
+#ifdef GPTR_THREAD
+        {
+            std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
+            GcPtrBase::register_gc_object(obj, sizeof(T), cb);
+            GcPtrBase::register_gcptr(this, cb);
+#ifdef GPTR_THREAD
+        }
+#endif
     }
 
     template <typename Deleter>
