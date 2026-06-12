@@ -263,6 +263,7 @@ private:
             ctx.all_ptrs.erase(addr);
         }
 
+        std::vector<ControlBlock*> to_delete;
         for (auto* cb : garbage) {
             int expected = 1;
             if (!cb->ref_count.compare_exchange_strong(expected, 0,
@@ -272,6 +273,9 @@ private:
                 cb->invoke_deleter(cb->object, cb->deleter_ctx);
             if (cb->destroy_ctx)
                 cb->destroy_ctx(cb->deleter_ctx);
+            to_delete.push_back(cb);
+        }
+        for (auto* cb : to_delete) {
             delete cb;
         }
     }
