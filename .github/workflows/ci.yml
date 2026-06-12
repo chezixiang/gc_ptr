@@ -31,12 +31,15 @@ jobs:
             cxxflags: -std=c++17 -Wall -Wextra -Wpedantic -g -I.
             ldflags: -lgtest -lgtest_main
 
-          - name: mingw-ucrt (ASan + multi-thread)
-            msystem: UCRT64
-            cxx: g++
-            install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gtest
-            cxxflags: -std=c++17 -Wall -Wextra -Wpedantic -g -I. -DGPTR_THREAD -fsanitize=address -static-libasan
-            ldflags: -lgtest -lgtest_main -pthread -fsanitize=address -static-libasan
+          - name: clang64 (ASan + multi-thread)
+            msystem: CLANG64
+            cxx: clang++
+            install: mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-gtest
+            cxxflags: >-
+              -std=c++17 -Wall -Wextra -Wpedantic -g -I.
+              -DGPTR_THREAD
+              -fsanitize=address
+            ldflags: -lgtest -lgtest_main -pthread -fsanitize=address
 
           - name: clang64 (multi-thread)
             msystem: CLANG64

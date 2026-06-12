@@ -251,6 +251,18 @@ private:
             }
         }
 
+        std::set<ControlBlock*> garbage_set(garbage.begin(), garbage.end());
+        std::vector<const void*> orphaned_ptrs;
+        for (const auto& [gcptr_addr, cb] : ctx.all_ptrs) {
+            if (!cb || garbage_set.count(cb) ||
+                ctx.gc_objects.find(cb->object) == ctx.gc_objects.end()) {
+                orphaned_ptrs.push_back(gcptr_addr);
+            }
+        }
+        for (auto* addr : orphaned_ptrs) {
+            ctx.all_ptrs.erase(addr);
+        }
+
         for (auto* cb : garbage) {
             int expected = 1;
             if (!cb->ref_count.compare_exchange_strong(expected, 0,
@@ -261,16 +273,6 @@ private:
             if (cb->destroy_ctx)
                 cb->destroy_ctx(cb->deleter_ctx);
             delete cb;
-        }
-
-        std::vector<const void*> orphaned_ptrs;
-        for (const auto& [gcptr_addr, cb] : ctx.all_ptrs) {
-            if (cb && ctx.gc_objects.find(cb->object) == ctx.gc_objects.end()) {
-                orphaned_ptrs.push_back(gcptr_addr);
-            }
-        }
-        for (auto* addr : orphaned_ptrs) {
-            ctx.all_ptrs.erase(addr);
         }
     }
 
