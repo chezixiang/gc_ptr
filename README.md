@@ -336,7 +336,6 @@ git clone --depth 1 --branch v1.14.0 https://github.com/google/googletest.git
 cl /std:c++17 /W4 /DGPTR_THREAD /EHsc /I. /Igoogletest\googletest /Igoogletest\googletest\include /Itests ^
   tests\gc_ptr_test.cpp ^
   googletest\googletest\src\gtest-all.cc ^
-  googletest\googletest\src\gtest_main.cc ^
   /Fe:gc_ptr_test.exe
 gc_ptr_test.exe
 ```
