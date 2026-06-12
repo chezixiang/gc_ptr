@@ -240,10 +240,14 @@ TEST_F(GcPtrTest, Should_SelfAssignCopy) {
 
 TEST_F(GcPtrTest, Should_SelfAssignMove) {
     auto ptr = make_gc<int>(42);
+#ifdef __GNUC__
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wself-move"
+#endif
     ptr = std::move(ptr);
+#ifdef __GNUC__
     #pragma GCC diagnostic pop
+#endif
 }
 
 struct ThrowInConstructor {
