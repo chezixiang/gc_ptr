@@ -579,8 +579,14 @@ private:
         if (!cb_)
             return;
         if (cb_->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+#ifdef GPTR_THREAD
+            std::lock_guard<std::recursive_mutex> lock(gc_mutex());
+#endif
+            GcPtrBase::unregister_gcptr(this);
             if (gc_get_context().gc_in_progress.load(std::memory_order_acquire)) {
                 cb_->ref_count.store(1, std::memory_order_release);
+                cb_ = nullptr;
+                ptr_ = nullptr;
                 return;
             }
             if (cb_->invoke_deleter)
