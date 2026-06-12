@@ -19,37 +19,43 @@ jobs:
         include:
           - name: mingw-ucrt (multi-thread)
             msystem: UCRT64
-            install: mingw-w64-ucrt-x86_64-gtest
+            cxx: g++
+            install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gtest
             cxxflags: -std=c++17 -Wall -Wextra -Wpedantic -g -I. -DGPTR_THREAD
             ldflags: -lgtest -lgtest_main -pthread
 
           - name: mingw-ucrt (single-thread)
             msystem: UCRT64
-            install: mingw-w64-ucrt-x86_64-gtest
+            cxx: g++
+            install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gtest
             cxxflags: -std=c++17 -Wall -Wextra -Wpedantic -g -I.
             ldflags: -lgtest -lgtest_main
 
           - name: mingw-ucrt (ASan + multi-thread)
             msystem: UCRT64
-            install: mingw-w64-ucrt-x86_64-gtest
+            cxx: g++
+            install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gtest
             cxxflags: -std=c++17 -Wall -Wextra -Wpedantic -g -I. -DGPTR_THREAD -fsanitize=address -static-libasan
             ldflags: -lgtest -lgtest_main -pthread -fsanitize=address -static-libasan
 
           - name: clang64 (multi-thread)
             msystem: CLANG64
-            install: mingw-w64-clang-x86_64-gtest
+            cxx: clang++
+            install: mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-gtest
             cxxflags: -std=c++17 -Wall -Wextra -Wpedantic -g -I. -DGPTR_THREAD
             ldflags: -lgtest -lgtest_main -pthread
 
           - name: clang64 (single-thread)
             msystem: CLANG64
-            install: mingw-w64-clang-x86_64-gtest
+            cxx: clang++
+            install: mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-gtest
             cxxflags: -std=c++17 -Wall -Wextra -Wpedantic -g -I.
             ldflags: -lgtest -lgtest_main
 
           - name: clang64 (UBSan + multi-thread)
             msystem: CLANG64
-            install: mingw-w64-clang-x86_64-gtest
+            cxx: clang++
+            install: mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-gtest
             cxxflags: >-
               -std=c++17 -Wall -Wextra -Wpedantic -g -I.
               -DGPTR_THREAD
@@ -72,4 +78,4 @@ jobs:
       - name: Build and test
         run: |
           make clean
-          make test CXXFLAGS="${{ matrix.cxxflags }}" LDFLAGS="${{ matrix.ldflags }}"
+          make test CXX="${{ matrix.cxx }}" CXXFLAGS="${{ matrix.cxxflags }}" LDFLAGS="${{ matrix.ldflags }}"

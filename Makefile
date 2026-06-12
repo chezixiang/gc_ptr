@@ -1,6 +1,8 @@
-CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -Wpedantic -g -I. -DGPTR_THREAD
-LDFLAGS = -lgtest -lgtest_main -pthread
+CXX ?= g++
+AR ?= ar
+RM ?= rm -f
+CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -g -I. -DGPTR_THREAD
+LDFLAGS ?= -lgtest -lgtest_main -pthread
 COVFLAGS = --coverage
 
 TEST_DIR = tests
@@ -22,7 +24,7 @@ coverage: LDFLAGS += $(COVFLAGS)
 coverage: clean $(TARGET)
 	./$(TARGET) || true
 	gcov -b -c $(TEST_SRC)
-	gcov -b -c $(TEST_SRC) | findstr "gc_ptr.hpp"
+	gcov -b -c $(TEST_SRC) | grep "gc_ptr.hpp"
 
 clean:
-	rm -f $(TARGET) *.gcda *.gcno *.gcov tests/*.gcda tests/*.gcno tests/*.gcov
+	$(RM) $(TARGET) *.gcda *.gcno *.gcov tests/*.gcda tests/*.gcno tests/*.gcov
