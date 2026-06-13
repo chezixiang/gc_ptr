@@ -505,9 +505,18 @@ public:
         if (old) {
             GcPtrBase::unregister_gc_object(old);
             if (cb_) {
-                if (cb_->destroy_ctx)
-                    cb_->destroy_ctx(cb_->deleter_ctx);
-                delete cb_;
+                // Ownership of the pointee is being transferred out of the
+                // GcPtr system.  Disarm the deleter so that any other GcPtr
+                // instances sharing this control block will NOT invoke the
+                // deleter on the (now externally-owned) object.
+                cb_->invoke_deleter = nullptr;
+                if (cb_->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                    // This was the last reference to the control block --
+                    // clean up the deleter context and free the control block.
+                    if (cb_->destroy_ctx)
+                        cb_->destroy_ctx(cb_->deleter_ctx);
+                    delete cb_;
+                }
             }
             ptr_ = nullptr;
             cb_ = nullptr;

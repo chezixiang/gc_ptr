@@ -1637,6 +1637,86 @@ TEST_F(GcPtrTest, Should_HandleDirectControlBlockConstruction) {
     delete cb;
 }
 
+TEST_F(GcPtrTest, Should_NotCorruptSharedControlBlockOnRelease) {
+    // Regression: release() used to unconditionally `delete cb_` even when
+    // other GcPtr instances shared that same control block, causing
+    // heap-use-after-free / double-free when the other GcPtrs destructed.
+    Counted::counter = 0;
+    {
+        auto a = make_gc<Counted>(1);
+        GcPtr<Counted> b(a);     // shares the same control block
+        EXPECT_EQ(Counted::counter, 1);
+
+        Counted* raw = a.release();
+        EXPECT_EQ(Counted::counter, 1);
+        EXPECT_FALSE(a);
+        // `b` must still be valid because it held a second reference.
+        EXPECT_TRUE(b);
+        EXPECT_EQ(b->value, 1);
+
+        delete raw;   // ownership was transferred out of the GcPtr system.
+        EXPECT_EQ(Counted::counter, 0);
+
+        // Destroying b must NOT double-free or crash -- its control block
+        // is either still alive (ref_count > 1 at release-time, deferred
+        // delete) or was the sole owner and cleanly freed at release().
+    }
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_AllowReleaseWithSingleOwner) {
+    // Single-owner release: the pre-fix code already worked, but verify we
+    // haven't regressed it and that the deleter fires exactly once.
+    Counted::counter = 0;
+    Counted* raw = nullptr;
+    {
+        auto a = make_gc<Counted>(7);
+        EXPECT_EQ(Counted::counter, 1);
+        raw = a.release();
+        EXPECT_FALSE(a);
+        EXPECT_EQ(Counted::counter, 1);
+    }
+    // Object must still be alive (ownership was released from GcPtr system).
+    EXPECT_EQ(Counted::counter, 1);
+    EXPECT_EQ(raw->value, 7);
+    delete raw;
+    EXPECT_EQ(Counted::counter, 0);
+}
+
+TEST_F(GcPtrTest, Should_NotDoubleFreeAfterReleaseFromSharedPointer) {
+    // Explicit: release() transfers ownership out.  No other GcPtr should
+    // cause the destructor/deleter to run on the released object again.
+    Counted::counter = 0;
+    {
+        auto root = make_gc<Counted>(42);
+        GcPtr<Counted> copy1(root);
+        GcPtr<Counted> copy2(root);
+        EXPECT_EQ(Counted::counter, 1);
+
+        Counted* raw = root.release();
+        EXPECT_EQ(Counted::counter, 1);
+
+        // copy1 / copy2 still reference the same underlying object, but
+        // release() disarmed the deleter -- neither their decrements nor
+        // a gc cycle should destroy the (now externally-owned) object.
+        EXPECT_EQ(copy1->value, 42);
+        EXPECT_EQ(copy2->value, 42);
+
+        GcPtrBase::collect();
+        EXPECT_EQ(Counted::counter, 1);
+
+        // Give the two remaining copies a clean slate: break their
+        // references so they don't try to touch the externally-owned object.
+        copy1.reset();
+        copy2.reset();
+        EXPECT_EQ(Counted::counter, 1);
+
+        delete raw;
+        EXPECT_EQ(Counted::counter, 0);
+    }
+    EXPECT_EQ(Counted::counter, 0);
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
